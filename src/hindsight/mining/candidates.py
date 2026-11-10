@@ -22,6 +22,7 @@ class Candidate:
     test_files: tuple[str, ...]
     source_files: tuple[str, ...]
     ai_assisted: bool
+    message: str = ""
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -71,6 +72,7 @@ def list_candidates(
                 test_files=tests,
                 source_files=sources,
                 ai_assisted=is_ai_assisted(body, ai_patterns),
+                message=body.strip(),
             )
         )
     return candidates

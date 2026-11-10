@@ -126,6 +126,13 @@ class Store:
             (commit_sha, str(stage), str(outcome), reason, _now()),
         )
 
+    def outcome(self, commit_sha: str, stage: Stage) -> Outcome | None:
+        row = self._db.execute(
+            "SELECT outcome FROM mining_log WHERE commit_sha = ? AND stage = ?",
+            (commit_sha, str(stage)),
+        ).fetchone()
+        return Outcome(row[0]) if row else None
+
     def funnel(self) -> list[FunnelRow]:
         rows = []
         for stage in Stage:
@@ -204,6 +211,43 @@ class Store:
             image_digest=row[10],
             curation_status=row[11],
         )
+
+    def accepted_tasks(self, curation_status: str | None = None) -> list[Task]:
+        """Tasks that passed fail-to-pass classification, oldest commit first."""
+        query = """SELECT t.commit_sha FROM tasks t
+                   JOIN mining_log m ON m.commit_sha = t.commit_sha
+                   WHERE m.stage = ? AND m.outcome = 'passed'"""
+        params: list[str] = [str(Stage.FAIL_TO_PASS)]
+        if curation_status is not None:
+            query += " AND t.curation_status = ?"
+            params.append(curation_status)
+        query += " ORDER BY t.commit_date, t.commit_sha"
+        shas = [row[0] for row in self._db.execute(query, params).fetchall()]
+        return [task for sha in shas if (task := self.get_task(sha)) is not None]
+
+    def set_statement(self, commit_sha: str, statement: str, source: str) -> None:
+        self._db.execute(
+            "UPDATE tasks SET statement = ?, statement_source = ? WHERE commit_sha = ?",
+            (statement, source, commit_sha),
+        )
+
+    def set_curation(self, commit_sha: str, status: str, curated_by: str) -> None:
+        """Record a review decision (RF-11) and mirror it in the funnel."""
+        self._db.execute(
+            "UPDATE tasks SET curation_status = ?, curated_by = ?, curated_at = ? "
+            "WHERE commit_sha = ?",
+            (status, curated_by, _now(), commit_sha),
+        )
+        if status == "approved":
+            self.log(commit_sha, Stage.REVIEW, Outcome.PASSED)
+        elif status == "discarded":
+            self.log(commit_sha, Stage.REVIEW, Outcome.DISCARDED, "discarded in review")
+
+    def curation_info(self, commit_sha: str) -> tuple[str | None, str | None]:
+        row = self._db.execute(
+            "SELECT curated_by, curated_at FROM tasks WHERE commit_sha = ?", (commit_sha,)
+        ).fetchone()
+        return (row[0], row[1]) if row else (None, None)
 
     def count_tasks(self) -> int:
         return self._db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]

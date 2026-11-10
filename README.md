@@ -19,7 +19,7 @@ Early development. The V1.0 requirements are defined and a manual end-to-end spi
 | Command | What it does | Status |
 | --- | --- | --- |
 | `mine` | History → fail-to-pass tasks | Done: candidates, AI filter, snapshots, images, F2P/P2P |
-| `review` | Human curation of task statements | Planned |
+| `review` | Human curation of task statements | Done: approve, edit, discard, leakage hints |
 | `plan` | Cost estimate and minimum detectable effect | Planned |
 | `run` | Run configurations in sandboxes | Planned |
 | `report` | Statistical HTML report | Planned |
@@ -44,6 +44,19 @@ commit's changes applied (after, twice), in containers without network. Tests th
 and pass in every after run are **fail-to-pass**; tests that pass in both are **pass-to-pass**;
 tests whose after outcome changes are flaky and ignored. Only tasks with at least one
 fail-to-pass test are kept. Use `--no-build` or `--no-classify` to stop earlier.
+
+Mining is resumable: candidates that already reached the final stage are skipped (`--force`
+redoes them). Accepted tasks get a statement from the first usable source in a cascade: the
+GitHub issue or PR referenced in the commit, the commit message, or a model that only sees the
+tests (`tasks.llm_command`). Then a human curates every statement:
+
+```bash
+hindsight review --config examples/evals.sqlglot.yaml
+```
+
+`review` shows each task's statement, its fail-to-pass tests and **leakage hints**: names that
+the fix introduces but the tests never use, or code copied from the fix. You approve, edit (in
+`$EDITOR`), discard, or view the reference fix.
 
 ## Development
 

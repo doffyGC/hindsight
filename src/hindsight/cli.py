@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import typer
@@ -12,6 +13,8 @@ from hindsight.mining.candidates import Candidate, list_candidates
 from hindsight.mining.classify import GoldTestError, GoldTestRunner
 from hindsight.mining.environment import BuildError, DockerBuilder, DockerUnavailable
 from hindsight.mining.snapshot import SnapshotError, build_snapshot, export_tree
+from hindsight.mining.statements import StatementWriter, github_repo_from_remote
+from hindsight.review import reviewer_name, run_review
 from hindsight.store import Outcome, Stage, Store, Task
 
 app = typer.Typer(
@@ -136,6 +139,61 @@ def _reason(message: str, limit: int = 160) -> str:
     return message if len(message) <= limit else message[: limit - 1] + "…"
 
 
+def _github_repo(cfg: Config) -> str | None:
+    if cfg.tasks.issue_provider != "github":
+        return None
+    return cfg.tasks.github_repo or github_repo_from_remote(cfg.project.repo)
+
+
+def _test_diff(cfg: Config, candidate: Candidate) -> str:
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(cfg.project.repo),
+            "diff",
+            candidate.parent,
+            candidate.sha,
+            "--",
+            *candidate.test_files,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout
+
+
+def _write_statements(cfg: Config, store: Store, candidates: list[Candidate]) -> int:
+    """Give every accepted task without a statement one from the cascade (RF-07)."""
+    by_sha = {c.sha: c for c in candidates}
+    pending = [t for t in store.accepted_tasks() if not t.statement and t.commit_sha in by_sha]
+    if not pending:
+        return 0
+    writer = StatementWriter(
+        sources=cfg.tasks.statement_sources,
+        github_repo=_github_repo(cfg),
+        min_commit_chars=cfg.tasks.min_commit_message_chars,
+        llm_command=cfg.tasks.llm_command,
+    )
+    written = 0
+    for task in pending:
+        candidate = by_sha[task.commit_sha]
+        statement = writer.write(
+            candidate.subject, candidate.message, task.f2p_tests, _test_diff(cfg, candidate)
+        )
+        if statement is not None:
+            store.set_statement(task.commit_sha, statement.text, statement.source)
+            written += 1
+    return written
+
+
+def _final_stage(build: bool, classify: bool) -> Stage:
+    if classify:
+        return Stage.FAIL_TO_PASS
+    return Stage.BUILD if build else Stage.SNAPSHOT
+
+
 @app.command()
 def version() -> None:
     """Print the Hindsight version."""
@@ -156,6 +214,9 @@ def mine(
     ),
     classify: bool = typer.Option(
         True, help="Classify fail-to-pass tests. Use --no-classify to stop after the images."
+    ),
+    force: bool = typer.Option(
+        False, help="Reprocess candidates that already reached the final stage."
     ),
 ) -> None:
     """Mine the git history into fail-to-pass tasks (RF-01 to RF-08, RF-24 to RF-27)."""
@@ -200,7 +261,11 @@ def mine(
             else:
                 store.log(candidate.sha, Stage.AI_FILTER, Outcome.PASSED)
 
-        selected = kept[:limit] if limit else kept
+        final = _final_stage(build, classify)
+        pending = [c for c in kept if force or store.outcome(c.sha, final) is None]
+        if len(pending) < len(kept):
+            typer.echo(f"Skipping {len(kept) - len(pending)} candidates already processed.")
+        selected = pending[:limit] if limit else pending
         tests = (
             GoldTestRunner(
                 builder.runner, cfg.environment.test_command, cfg.environment.test_timeout_s
@@ -217,6 +282,11 @@ def mine(
                 if image is not None and tests is not None:
                     _classify_one(cfg, store, tests, candidate, image)
 
+        if tests is not None:
+            written = _write_statements(cfg, store, candidates)
+            if written:
+                typer.echo(f"Statements written: {written}")
+
         _print_funnel(store)
         typer.echo(f"\nTasks stored: {store.count_tasks()} (in {cfg.store_path})")
         if tests is not None:
@@ -226,8 +296,27 @@ def mine(
 
 @app.command()
 def review(config: Path = CONFIG_OPTION) -> None:
-    """Curate task statements interactively (RF-09 to RF-11)."""
-    _not_implemented("review")
+    """Approve, edit or discard each fail-to-pass task's statement (RF-09 to RF-11)."""
+    cfg = _load(config)
+    if not cfg.store_path.exists():
+        typer.secho("No mining results yet; run 'hindsight mine --no-dry-run' first.", fg="red")
+        raise typer.Exit(code=1)
+    with Store.open(cfg.store_path) as store:
+        summary = run_review(
+            store,
+            cfg.task_dir,
+            prompt=lambda text: typer.prompt(text, default="s", show_default=False),
+            echo=typer.echo,
+            editor=lambda text: typer.edit(text, extension=".md"),
+            reviewer=reviewer_name(cfg.project.repo),
+            github_repo=_github_repo(cfg),
+        )
+        remaining = len(store.accepted_tasks(curation_status="pending"))
+        approved = len(store.accepted_tasks(curation_status="approved"))
+    typer.echo(
+        f"\nApproved {summary.approved}, discarded {summary.discarded}, "
+        f"skipped {summary.skipped}. Total approved: {approved}. Still pending: {remaining}."
+    )
 
 
 @app.command()

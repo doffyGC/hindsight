@@ -17,7 +17,7 @@ def test_help_lists_all_commands() -> None:
 
 
 def test_unimplemented_commands_exit_2(tmp_path: Path) -> None:
-    for command in ("review", "plan", "run", "report"):
+    for command in ("plan", "run", "report"):
         assert runner.invoke(app, [command]).exit_code == 2
 
 
@@ -204,3 +204,92 @@ def test_test_command_must_write_junit(repo: Path, tmp_path: Path) -> None:
     result = runner.invoke(app, ["mine", "-c", str(cfg)])
     assert result.exit_code == 1
     assert "/out/junit.xml" in result.output
+
+
+def _f2p_docker():
+    from .test_classify import FakeTestDocker
+
+    return FakeTestDocker(
+        {
+            "before": (0, _junit(("test_old", "passed"), ("test_new", "failed"))),
+            "after": (0, _junit(("test_old", "passed"), ("test_new", "passed"))),
+        }
+    )
+
+
+def _f2p_config(repo: Path, tmp_path: Path) -> Path:
+    cfg = tmp_path / "evals.yaml"
+    cfg.write_text(
+        f"project:\n  repo: {repo}\nworkdir: work\n"
+        "environment:\n  test_command: pytest --junitxml=/out/junit.xml\n"
+        "tasks:\n  issue_provider: none\n"
+    )
+    return cfg
+
+
+def test_mine_resumes_without_redoing_classified_tasks(
+    repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from hindsight import cli
+    from hindsight.mining.environment import DockerBuilder
+
+    docker = _f2p_docker()
+    monkeypatch.setattr(cli, "DockerBuilder", lambda timeout_s: DockerBuilder(runner=docker))
+    commit(repo, {"pkg/core.py": "x = 2\n", "tests/test_core.py": "def t(): 2\n"}, "fix")
+    cfg = _f2p_config(repo, tmp_path)
+
+    assert runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run"]).exit_code == 0
+    runs_after_first = sum(1 for c in docker.calls if c[:2] == ["docker", "run"])
+    second = runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run"])
+
+    assert second.exit_code == 0, second.output
+    assert "Skipping 1 candidates already processed." in second.output
+    assert sum(1 for c in docker.calls if c[:2] == ["docker", "run"]) == runs_after_first
+    forced = runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run", "--force"])
+    assert sum(1 for c in docker.calls if c[:2] == ["docker", "run"]) > runs_after_first
+    assert forced.exit_code == 0
+
+
+def test_mine_writes_statement_from_commit_message(repo: Path, tmp_path: Path, monkeypatch) -> None:
+    from hindsight import cli
+    from hindsight.mining.environment import DockerBuilder
+    from hindsight.store import Store
+
+    monkeypatch.setattr(cli, "DockerBuilder", lambda timeout_s: DockerBuilder(runner=_f2p_docker()))
+    message = "fix: x must be 2\n\nCallers expect x to be two, but it is one on startup."
+    commit(repo, {"pkg/core.py": "x = 2\n", "tests/test_core.py": "def t(): 2\n"}, message)
+    cfg = _f2p_config(repo, tmp_path)
+
+    result = runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "Statements written: 1" in result.output
+    with Store.open(tmp_path / "work" / "hindsight.sqlite") as store:
+        task = store.accepted_tasks()[0]
+    assert task.statement_source == "commit"
+    assert "Callers expect x to be two" in task.statement
+
+
+def test_review_command_approves(repo: Path, tmp_path: Path, monkeypatch) -> None:
+    from hindsight import cli
+    from hindsight.mining.environment import DockerBuilder
+    from hindsight.store import Store
+
+    monkeypatch.setattr(cli, "DockerBuilder", lambda timeout_s: DockerBuilder(runner=_f2p_docker()))
+    message = "fix: x must be 2\n\nCallers expect x to be two, but it is one on startup."
+    commit(repo, {"pkg/core.py": "x = 2\n", "tests/test_core.py": "def t(): 2\n"}, message)
+    cfg = _f2p_config(repo, tmp_path)
+    assert runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run"]).exit_code == 0
+
+    result = runner.invoke(app, ["review", "-c", str(cfg)], input="a\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Approved 1" in result.output and "Still pending: 0" in result.output
+    with Store.open(tmp_path / "work" / "hindsight.sqlite") as store:
+        assert store.accepted_tasks()[0].curation_status == "approved"
+
+
+def test_review_without_mining_fails(tmp_path: Path, repo: Path) -> None:
+    cfg = tmp_path / "evals.yaml"
+    cfg.write_text(f"project:\n  repo: {repo}\nworkdir: work\n")
+    assert runner.invoke(app, ["review", "-c", str(cfg)]).exit_code == 1

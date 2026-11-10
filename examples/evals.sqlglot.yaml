@@ -29,8 +29,14 @@ environment:
 tasks:
   include_ai_assisted: false
   stability_runs: 2           # after-runs used to detect flaky tests
+  # Statement cascade: first source with usable text wins; everything is reviewed later.
   statement_sources: [issue, commit, llm_from_tests]
-  issue_provider: github
+  issue_provider: github      # github | none; set GITHUB_TOKEN to avoid the 60 req/h limit
+  # github_repo: tobymao/sqlglot   # defaults to the clone's origin remote
+  min_commit_message_chars: 40
+  # Any command that reads the prompt on stdin and prints the statement. It only ever
+  # receives the gold test diff and the fail-to-pass test names, never the fix.
+  # llm_command: docker run --rm -i -e CLAUDE_CODE_OAUTH_TOKEN hindsight-base claude -p
 
 auth:
   mode: subscription          # api_key | subscription

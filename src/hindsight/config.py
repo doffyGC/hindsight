@@ -31,6 +31,11 @@ class ProjectConfig:
 class TasksConfig:
     include_ai_assisted: bool = False
     stability_runs: int = 2
+    statement_sources: tuple[str, ...] = ("issue", "commit", "llm_from_tests")
+    min_commit_message_chars: int = 40
+    issue_provider: str = "github"  # github | none
+    github_repo: str | None = None  # "owner/name"; defaults to the origin remote
+    llm_command: str | None = None  # reads the prompt on stdin, prints the statement
     ai_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_AI_PATTERNS))
 
 
@@ -91,6 +96,11 @@ def load_config(path: Path) -> Config:
             include_ai_assisted=bool(tasks_raw.get("include_ai_assisted", False)),
             ai_patterns=list(tasks_raw.get("ai_patterns") or DEFAULT_AI_PATTERNS),
             stability_runs=_positive_int(tasks_raw, "stability_runs", 2),
+            statement_sources=_statement_sources(tasks_raw),
+            min_commit_message_chars=_positive_int(tasks_raw, "min_commit_message_chars", 40),
+            issue_provider=_issue_provider(tasks_raw),
+            github_repo=tasks_raw.get("github_repo"),
+            llm_command=tasks_raw.get("llm_command"),
         ),
         environment=EnvironmentConfig(
             strip_instruction_files=(
@@ -139,3 +149,18 @@ def _positive_int(section: dict[str, Any], key: str, default: int) -> int:
     if not isinstance(value, int) or value < 1:
         raise ConfigError(f"{key} must be a positive integer")
     return value
+
+
+def _statement_sources(tasks_raw: dict[str, Any]) -> tuple[str, ...]:
+    sources = tuple(tasks_raw.get("statement_sources") or ("issue", "commit", "llm_from_tests"))
+    unknown = set(sources) - {"issue", "commit", "llm_from_tests"}
+    if unknown:
+        raise ConfigError(f"tasks.statement_sources has unknown entries: {sorted(unknown)}")
+    return sources
+
+
+def _issue_provider(tasks_raw: dict[str, Any]) -> str:
+    provider = str(tasks_raw.get("issue_provider", "github"))
+    if provider not in {"github", "none"}:
+        raise ConfigError("tasks.issue_provider must be 'github' or 'none' (gitlab is planned)")
+    return provider
