@@ -32,10 +32,24 @@ class TasksConfig:
 
 
 @dataclass(frozen=True)
+class EnvironmentConfig:
+    strip_instruction_files: list[str] = field(default_factory=lambda: ["CLAUDE.md", "AGENTS.md"])
+
+
+@dataclass(frozen=True)
 class Config:
     project: ProjectConfig
     tasks: TasksConfig
+    environment: EnvironmentConfig
+    workdir: Path
     raw: dict[str, Any]
+
+    @property
+    def store_path(self) -> Path:
+        return self.workdir / "hindsight.sqlite"
+
+    def task_dir(self, commit_sha: str) -> Path:
+        return self.workdir / "tasks" / commit_sha
 
 
 def load_config(path: Path) -> Config:
@@ -58,6 +72,8 @@ def load_config(path: Path) -> Config:
         raise ConfigError("project.since: 'auto' is not implemented yet; use an ISO date")
 
     tasks_raw = raw.get("tasks") or {}
+    env_raw = raw.get("environment") or {}
+    strip = env_raw.get("strip_instruction_files")
     return Config(
         project=ProjectConfig(
             repo=repo,
@@ -68,5 +84,11 @@ def load_config(path: Path) -> Config:
             include_ai_assisted=bool(tasks_raw.get("include_ai_assisted", False)),
             ai_patterns=list(tasks_raw.get("ai_patterns") or DEFAULT_AI_PATTERNS),
         ),
+        environment=EnvironmentConfig(
+            strip_instruction_files=(
+                list(strip) if strip is not None else ["CLAUDE.md", "AGENTS.md"]
+            ),
+        ),
+        workdir=(path.parent / str(raw.get("workdir", ".hindsight"))).resolve(),
         raw=raw,
     )
