@@ -9,8 +9,9 @@ import typer
 from hindsight import __version__
 from hindsight.config import Config, ConfigError, load_config
 from hindsight.mining.candidates import Candidate, list_candidates
+from hindsight.mining.classify import GoldTestError, GoldTestRunner
 from hindsight.mining.environment import BuildError, DockerBuilder, DockerUnavailable
-from hindsight.mining.snapshot import SnapshotError, build_snapshot
+from hindsight.mining.snapshot import SnapshotError, build_snapshot, export_tree
 from hindsight.store import Outcome, Stage, Store, Task
 
 app = typer.Typer(
@@ -69,17 +70,65 @@ def _snapshot_one(cfg: Config, store: Store, candidate: Candidate) -> bool:
     return True
 
 
-def _build_one(cfg: Config, store: Store, builder: DockerBuilder, candidate: Candidate) -> None:
+def _build_deps(cfg: Config, builder: DockerBuilder) -> str | None:
+    """Build the shared deps image once; return its tag (None when not configured)."""
+    spec = cfg.environment.spec
+    if not spec.deps_setup.strip():
+        return None
+    context = cfg.workdir / "deps"
     try:
-        image = builder.build(cfg.task_dir(candidate.sha), candidate.sha, cfg.environment.spec)
+        tree = export_tree(cfg.project.repo, spec.deps_ref, context / "src")
+        image = builder.build_deps(context, spec, tree)
+    except (SnapshotError, BuildError) as exc:
+        typer.secho(f"Shared deps image failed: {exc}", fg="red", err=True)
+        typer.echo(f"Build log: {context / 'build.log'}", err=True)
+        raise typer.Exit(code=1) from exc
+    state = "reused" if image.cached else "built"
+    typer.echo(f"Shared deps image {state}: {image.tag} (from {spec.deps_ref})")
+    return image.tag
+
+
+def _build_one(
+    cfg: Config,
+    store: Store,
+    builder: DockerBuilder,
+    candidate: Candidate,
+    deps_image: str | None,
+) -> str | None:
+    """Build the task image; return its tag, or None when the task was discarded."""
+    try:
+        image = builder.build(
+            cfg.task_dir(candidate.sha), candidate.sha, cfg.environment.spec, deps_image
+        )
     except BuildError as exc:
         store.log(candidate.sha, Stage.BUILD, Outcome.DISCARDED, _reason(str(exc)))
-        return
+        return None
     store.log(candidate.sha, Stage.BUILD, Outcome.PASSED, "cached" if image.cached else None)
     task = store.get_task(candidate.sha)
     if task is not None:
         task.image_digest = image.image_id
         store.upsert_task(task)
+    return image.tag
+
+
+def _classify_one(
+    cfg: Config, store: Store, tests: GoldTestRunner, candidate: Candidate, image: str
+) -> None:
+    try:
+        result = tests.classify_task(
+            image, cfg.task_dir(candidate.sha), stability_runs=cfg.tasks.stability_runs
+        )
+    except GoldTestError as exc:
+        store.log(candidate.sha, Stage.FAIL_TO_PASS, Outcome.DISCARDED, _reason(str(exc)))
+        return
+    task = store.get_task(candidate.sha)
+    if task is not None:
+        task.f2p_tests, task.p2p_tests = list(result.f2p), list(result.p2p)
+        store.upsert_task(task)
+    if result.accepted:
+        store.log(candidate.sha, Stage.FAIL_TO_PASS, Outcome.PASSED)
+    else:
+        store.log(candidate.sha, Stage.FAIL_TO_PASS, Outcome.DISCARDED, result.discard_reason())
 
 
 def _reason(message: str, limit: int = 160) -> str:
@@ -105,6 +154,9 @@ def mine(
     build: bool = typer.Option(
         True, help="Build a Docker image per task. Use --no-build to stop after snapshots."
     ),
+    classify: bool = typer.Option(
+        True, help="Classify fail-to-pass tests. Use --no-classify to stop after the images."
+    ),
 ) -> None:
     """Mine the git history into fail-to-pass tasks (RF-01 to RF-08, RF-24 to RF-27)."""
     cfg = _load(config)
@@ -122,6 +174,14 @@ def mine(
         typer.echo(f"Kept for the next stages: {len(kept)}")
         return
 
+    classify = classify and build
+    if classify and not cfg.environment.test_command:
+        typer.secho(
+            "environment.test_command is required to classify tasks (or pass --no-classify).",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     builder = DockerBuilder(timeout_s=cfg.environment.build_timeout_s) if build else None
     if builder is not None:
         try:
@@ -129,6 +189,8 @@ def mine(
         except DockerUnavailable as exc:
             typer.secho(f"{exc}. Start Docker or pass --no-build.", fg="red", err=True)
             raise typer.Exit(code=1) from exc
+
+    deps_image = _build_deps(cfg, builder) if builder is not None else None
 
     with Store.open(cfg.store_path) as store:
         for candidate in candidates:
@@ -139,15 +201,27 @@ def mine(
                 store.log(candidate.sha, Stage.AI_FILTER, Outcome.PASSED)
 
         selected = kept[:limit] if limit else kept
-        label = "Snapshots and images" if builder else "Snapshots"
+        tests = (
+            GoldTestRunner(
+                builder.runner, cfg.environment.test_command, cfg.environment.test_timeout_s
+            )
+            if classify and builder is not None
+            else None
+        )
+        label = "Mining tasks" if tests else ("Snapshots and images" if builder else "Snapshots")
         with typer.progressbar(selected, label=label) as progress:
             for candidate in progress:
-                if _snapshot_one(cfg, store, candidate) and builder is not None:
-                    _build_one(cfg, store, builder, candidate)
+                if not _snapshot_one(cfg, store, candidate) or builder is None:
+                    continue
+                image = _build_one(cfg, store, builder, candidate, deps_image)
+                if image is not None and tests is not None:
+                    _classify_one(cfg, store, tests, candidate, image)
 
         _print_funnel(store)
         typer.echo(f"\nTasks stored: {store.count_tasks()} (in {cfg.store_path})")
-    typer.secho("Next stages (Docker build and fail-to-pass) are not implemented yet.", fg="yellow")
+        if tests is not None:
+            accepted = next(r.passed for r in store.funnel() if r.stage == Stage.FAIL_TO_PASS)
+            typer.echo(f"Fail-to-pass tasks ready for review: {accepted}")
 
 
 @app.command()

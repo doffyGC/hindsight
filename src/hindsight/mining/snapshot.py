@@ -36,6 +36,7 @@ class SnapshotError(RuntimeError):
 class Snapshot:
     workdir: Path  # what the agent receives
     gold_dir: Path  # gold test files, mirrored at their repository paths
+    reference_patch: Path  # the commit's non-test changes, for the positive control
     gold_test_files: tuple[str, ...]
     stripped_files: tuple[str, ...]
 
@@ -77,18 +78,35 @@ def _strip(workdir: Path, names: Iterable[str]) -> tuple[str, ...]:
     return tuple(removed)
 
 
+def export_tree(repo: Path, ref: str, dest: Path) -> str:
+    """Extract the tree of `ref` into `dest` (replacing it); return the tree id."""
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    tree = _run("git", "-C", str(repo), "rev-parse", f"{ref}^{{tree}}").decode().strip()
+    _extract(_run("git", "-C", str(repo), "archive", ref), dest)
+    return tree
+
+
 def build_snapshot(
     repo: Path,
     candidate: Candidate,
     dest: Path,
     strip_files: Iterable[str] = (),
 ) -> Snapshot:
-    """Build `dest/work` (parent tree, fresh repo) and `dest/gold` (the commit's test files)."""
+    """Build the task directory.
+
+    - `work/`: parent tree in a fresh one-commit repository (what the agent receives);
+    - `gold/`: the commit's test files (evaluator only);
+    - `reference/reference.patch`: the commit's non-test changes (positive control only).
+    """
+    strip_files = tuple(strip_files)
     if dest.exists():
         shutil.rmtree(dest)
-    workdir, gold_dir = dest / "work", dest / "gold"
+    workdir, gold_dir, ref_dir = dest / "work", dest / "gold", dest / "reference"
     workdir.mkdir(parents=True)
     gold_dir.mkdir()
+    ref_dir.mkdir()
 
     _extract(_run("git", "-C", str(repo), "archive", candidate.parent), workdir)
     stripped = _strip(workdir, strip_files)
@@ -111,4 +129,22 @@ def build_snapshot(
     if not gold:
         raise SnapshotError("commit only deletes test files; no gold tests to restore")
 
-    return Snapshot(workdir, gold_dir, tuple(gold), stripped)
+    # Changes to stripped instruction files cannot apply to the snapshot, so leave them out.
+    patch_files = [f for f in candidate.source_files if Path(f).name not in strip_files]
+    reference_patch = ref_dir / "reference.patch"
+    reference_patch.write_bytes(
+        _run(
+            "git",
+            "-C",
+            str(repo),
+            "diff",
+            "--binary",
+            candidate.parent,
+            candidate.sha,
+            "--",
+            *patch_files,
+        )
+        if patch_files
+        else b""
+    )
+    return Snapshot(workdir, gold_dir, reference_patch, tuple(gold), stripped)

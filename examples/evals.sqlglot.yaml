@@ -5,19 +5,30 @@ project:
   since: "2026-01-01"         # "auto" (training cutoff) is planned, not implemented
   test_paths: [tests]
 
+workdir: .hindsight           # snapshots, images' build contexts and the SQLite store
+
 environment:
   base_image: python:3.12-slim
-  setup: |
-    pip install -e ".[dev]" pytest   # pytest is not in sqlglot's dev extras
+  system_packages: [git]
   build_env:
-    SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"
-  test_command: pytest --junitxml=/out/junit.xml
-  ignore_tests: [tests/test_sqlglotc.py]
+    SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"   # snapshots have no git history
+  # Shared layer, built once from deps_ref: all dependencies (~600 MB for sqlglot).
+  deps_ref: HEAD
+  deps_setup: |
+    pip install --no-cache-dir -e ".[dev]" pytest   # pytest is not in sqlglot's dev extras
+  # Per task, on top of the shared layer: only what changed (a few MB).
+  setup: |
+    pip install --no-cache-dir -e ".[dev]" pytest
+  # Must write JUnit XML to /out/junit.xml. test_sqlglotc.py needs the C extension.
+  test_command: >-
+    python -m pytest -q -p no:cacheprovider --ignore=tests/test_sqlglotc.py
+    --junitxml=/out/junit.xml
+  test_timeout_s: 900
   strip_instruction_files: [CLAUDE.md, AGENTS.md]
-  eval_parallelism: 4
 
 tasks:
   include_ai_assisted: false
+  stability_runs: 2           # after-runs used to detect flaky tests
   statement_sources: [issue, commit, llm_from_tests]
   issue_provider: github
 

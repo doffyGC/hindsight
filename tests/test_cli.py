@@ -81,7 +81,7 @@ def test_mine_records_build_outcomes(repo: Path, tmp_path: Path, monkeypatch) ->
     cfg = tmp_path / "evals.yaml"
     cfg.write_text(f"project:\n  repo: {repo}\nworkdir: work\n")
 
-    result = runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run"])
+    result = runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run", "--no-classify"])
 
     assert result.exit_code == 0, result.output
     assert "build failed: ERROR: could not install package: 1" in result.output
@@ -99,7 +99,8 @@ def test_mine_stores_image_id_on_success(repo: Path, tmp_path: Path, monkeypatch
     cfg = tmp_path / "evals.yaml"
     cfg.write_text(f"project:\n  repo: {repo}\nworkdir: work\n")
 
-    assert runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run"]).exit_code == 0
+    args = ["mine", "-c", str(cfg), "--no-dry-run", "--no-classify"]
+    assert runner.invoke(app, args).exit_code == 0
     with Store.open(tmp_path / "work" / "hindsight.sqlite") as store:
         sha = next(iter((tmp_path / "work" / "tasks").iterdir())).name
         assert store.get_task(sha).image_digest == "sha256:abc"
@@ -116,7 +117,90 @@ def test_mine_without_docker_fails_clearly(repo: Path, tmp_path: Path, monkeypat
     cfg = tmp_path / "evals.yaml"
     cfg.write_text(f"project:\n  repo: {repo}\nworkdir: work\n")
 
-    result = runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run"])
+    result = runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run", "--no-classify"])
 
     assert result.exit_code == 1
     assert "--no-build" in result.output
+
+
+def test_mine_builds_shared_deps_image_once(repo: Path, tmp_path: Path, monkeypatch) -> None:
+    from hindsight import cli
+    from hindsight.mining.environment import DockerBuilder
+
+    from .test_environment import FakeDocker
+
+    docker = FakeDocker()
+    monkeypatch.setattr(cli, "DockerBuilder", lambda timeout_s: DockerBuilder(runner=docker))
+    for i in range(2):
+        commit(repo, {"pkg/core.py": f"x = {i}1\n", "tests/test_core.py": f"# {i}\n"}, f"f{i}")
+    cfg = tmp_path / "evals.yaml"
+    cfg.write_text(
+        f"project:\n  repo: {repo}\nworkdir: work\n"
+        "environment:\n  deps_setup: pip install .\n  setup: pip install -e .\n"
+    )
+
+    result = runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run", "--no-classify"])
+
+    assert result.exit_code == 0, result.output
+    assert "Shared deps image built: hindsight-deps:" in result.output
+    builds = [c for c in docker.calls if c[:2] == ["docker", "build"]]
+    assert builds[0][3].startswith("hindsight-deps:")
+    assert all(b[3].startswith("hindsight-task:") for b in builds[1:])
+    task_dockerfile = next((tmp_path / "work" / "tasks").iterdir()) / "Dockerfile"
+    assert task_dockerfile.read_text().startswith("FROM hindsight-deps:")
+
+
+def _junit(*cases: tuple[str, str]) -> str:
+    body = ""
+    for name, status in cases:
+        inner = {"passed": "", "failed": "<failure message='x'/>", "skipped": "<skipped/>"}[status]
+        body += f"<testcase classname='tests.test_core' name='{name}'>{inner}</testcase>"
+    return f"<testsuites><testsuite>{body}</testsuite></testsuites>"
+
+
+def test_mine_classifies_fail_to_pass(repo: Path, tmp_path: Path, monkeypatch) -> None:
+    from hindsight import cli
+    from hindsight.mining.environment import DockerBuilder
+    from hindsight.store import Store
+
+    from .test_classify import FakeTestDocker
+
+    docker = FakeTestDocker(
+        {
+            "before": (0, _junit(("test_old", "passed"), ("test_new", "failed"))),
+            "after": (0, _junit(("test_old", "passed"), ("test_new", "passed"))),
+        }
+    )
+    monkeypatch.setattr(cli, "DockerBuilder", lambda timeout_s: DockerBuilder(runner=docker))
+    commit(repo, {"pkg/core.py": "x = 2\n", "tests/test_core.py": "def t(): 2\n"}, "fix")
+    cfg = tmp_path / "evals.yaml"
+    cfg.write_text(
+        f"project:\n  repo: {repo}\nworkdir: work\n"
+        "environment:\n  test_command: pytest --junitxml=/out/junit.xml\n"
+    )
+
+    result = runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "Fail-to-pass tasks ready for review: 1" in result.output
+    with Store.open(tmp_path / "work" / "hindsight.sqlite") as store:
+        sha = next(iter((tmp_path / "work" / "tasks").iterdir())).name
+        task = store.get_task(sha)
+    assert task.f2p_tests == ["tests.test_core::test_new"]
+    assert task.p2p_tests == ["tests.test_core::test_old"]
+
+
+def test_mine_requires_test_command_to_classify(repo: Path, tmp_path: Path) -> None:
+    cfg = tmp_path / "evals.yaml"
+    cfg.write_text(f"project:\n  repo: {repo}\nworkdir: work\n")
+    result = runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run"])
+    assert result.exit_code == 1
+    assert "test_command" in result.output
+
+
+def test_test_command_must_write_junit(repo: Path, tmp_path: Path) -> None:
+    cfg = tmp_path / "evals.yaml"
+    cfg.write_text(f"project:\n  repo: {repo}\nenvironment:\n  test_command: pytest\n")
+    result = runner.invoke(app, ["mine", "-c", str(cfg)])
+    assert result.exit_code == 1
+    assert "/out/junit.xml" in result.output

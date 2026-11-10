@@ -11,9 +11,10 @@ from hindsight.mining.environment import (
     DockerBuilder,
     DockerUnavailable,
     EnvironmentSpec,
-    image_tag,
-    render_dockerfile,
-    render_setup_script,
+    deps_tag,
+    render_deps_dockerfile,
+    render_task_dockerfile,
+    task_tag,
 )
 
 SPEC = EnvironmentSpec(
@@ -27,7 +28,8 @@ class FakeDocker:
     """Records docker commands and answers them from a small script of behaviours."""
 
     def __init__(self, *, has_image: bool = False, build_code: int = 0, build_out: str = ""):
-        self.has_image = has_image
+        self.has_any = has_image  # pretend every tag already exists
+        self.images: set[str] = set()
         self.build_code = build_code
         self.build_out = build_out
         self.calls: list[list[str]] = []
@@ -38,10 +40,11 @@ class FakeDocker:
         if args[:2] == ["docker", "version"]:
             return CommandResult(0, "27.0.0")
         if args[:3] == ["docker", "image", "inspect"]:
-            return CommandResult(0, "sha256:abc\n") if self.has_image else CommandResult(1, "")
+            exists = self.has_any or args[-1] in self.images
+            return CommandResult(0, "sha256:abc\n") if exists else CommandResult(1, "")
         if args[:2] == ["docker", "build"]:
             if self.build_code == 0:
-                self.has_image = True
+                self.images.add(args[3])
             return CommandResult(self.build_code, self.build_out)
         raise AssertionError(f"unexpected command {args}")
 
@@ -50,7 +53,7 @@ class FakeDocker:
 
 
 def test_dockerfile_layout() -> None:
-    dockerfile = render_dockerfile(SPEC)
+    dockerfile = render_task_dockerfile(SPEC, None)
     assert dockerfile.splitlines()[0] == "FROM python:3.12-slim"
     assert "apt-get install -y --no-install-recommends git" in dockerfile
     assert dockerfile.index('ENV A="1"') < dockerfile.index('ENV B="2"')
@@ -60,21 +63,34 @@ def test_dockerfile_layout() -> None:
 
 
 def test_dockerfile_without_setup_or_packages() -> None:
-    dockerfile = render_dockerfile(EnvironmentSpec(system_packages=()))
+    dockerfile = render_task_dockerfile(EnvironmentSpec(system_packages=()), None)
     assert "apt-get" not in dockerfile
     assert "hindsight-setup" not in dockerfile
 
 
-def test_setup_script_fails_fast() -> None:
-    assert render_setup_script(SPEC).startswith("#!/bin/bash\nset -euo pipefail\n")
+def test_task_image_on_top_of_deps_image_skips_system_layers() -> None:
+    dockerfile = render_task_dockerfile(SPEC, "hindsight-deps:abc")
+    assert dockerfile.splitlines()[0] == "FROM hindsight-deps:abc"
+    assert "apt-get" not in dockerfile and "ENV" not in dockerfile
+    assert "COPY work /work" in dockerfile
 
 
-def test_tag_is_stable_and_tracks_the_environment() -> None:
+def test_deps_dockerfile_installs_from_the_shared_tree() -> None:
+    spec = EnvironmentSpec(deps_setup='pip install ".[dev]"', build_env={"A": "1"})
+    dockerfile = render_deps_dockerfile(spec)
+    assert "COPY src /deps-src" in dockerfile
+    assert 'ENV A="1"' in dockerfile
+    assert dockerfile.rstrip().endswith("RUN cd /deps-src && bash /tmp/hindsight-setup.sh")
+
+
+def test_tags_are_stable_and_track_inputs() -> None:
     sha = "8a524dfa1ea61f924afa0f58e0c16a1882410b71"
-    assert image_tag(sha, SPEC) == image_tag(sha, SPEC)
-    assert image_tag(sha, SPEC).startswith("hindsight-task:8a524dfa1ea6-")
+    assert task_tag(sha, SPEC, None) == task_tag(sha, SPEC, None)
+    assert task_tag(sha, SPEC, None).startswith("hindsight-task:8a524dfa1ea6-")
     changed = EnvironmentSpec(base_image=SPEC.base_image, setup="pip install -e .")
-    assert image_tag(sha, SPEC) != image_tag(sha, changed)
+    assert task_tag(sha, SPEC, None) != task_tag(sha, changed, None)
+    assert task_tag(sha, SPEC, "hindsight-deps:a") != task_tag(sha, SPEC, "hindsight-deps:b")
+    assert deps_tag(SPEC, "tree1") != deps_tag(SPEC, "tree2")
 
 
 def test_build_writes_context_and_returns_image(tmp_path: Path) -> None:
@@ -83,8 +99,11 @@ def test_build_writes_context_and_returns_image(tmp_path: Path) -> None:
     image = DockerBuilder(runner=docker).build(tmp_path, "a" * 40, SPEC)
     assert (image.image_id, image.cached) == ("sha256:abc", False)
     assert docker.builds() == 1
-    assert (tmp_path / "Dockerfile").read_text() == render_dockerfile(SPEC)
-    assert "gold" in (tmp_path / ".dockerignore").read_text().split()
+    assert (tmp_path / "Dockerfile").read_text() == render_task_dockerfile(SPEC, None)
+    ignored = (tmp_path / ".dockerignore").read_text().split()
+    assert "gold" in ignored and "reference" in ignored
+    setup = (tmp_path / ".hindsight-setup.sh").read_text()
+    assert setup.startswith("#!/bin/bash\nset -euo pipefail\n")
     assert (tmp_path / "build.log").exists()
 
 

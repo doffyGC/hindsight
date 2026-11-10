@@ -18,7 +18,7 @@ Early development. The V1.0 requirements are defined and a manual end-to-end spi
 
 | Command | What it does | Status |
 | --- | --- | --- |
-| `mine` | History → fail-to-pass tasks | Candidates, AI filter, snapshots, Docker images, SQLite funnel |
+| `mine` | History → fail-to-pass tasks | Done: candidates, AI filter, snapshots, images, F2P/P2P |
 | `review` | Human curation of task statements | Planned |
 | `plan` | Cost estimate and minimum detectable effect | Planned |
 | `run` | Run configurations in sandboxes | Planned |
@@ -36,8 +36,14 @@ hindsight mine --config examples/evals.sqlglot.yaml --no-dry-run --limit 5  # sn
 Snapshots and the SQLite store go to `.hindsight/` next to the config file (`workdir` option).
 Each task gets `work/` (the parent commit in a fresh one-commit repository, without
 instruction files such as CLAUDE.md) and `gold/` (the commit's test files, for the evaluator).
-Each task also gets a Docker image (`hindsight-task:<sha>-<env hash>`) with its dependencies
-installed; gold tests never enter the image. Use `--no-build` to stop after the snapshots.
+Images come in two layers: a shared `hindsight-deps` image with all dependencies, built once,
+and a thin `hindsight-task` image per task (a few MB). Gold tests never enter any image.
+
+Each task is then classified: the gold tests run on the parent commit (before) and with the
+commit's changes applied (after, twice), in containers without network. Tests that fail before
+and pass in every after run are **fail-to-pass**; tests that pass in both are **pass-to-pass**;
+tests whose after outcome changes are flaky and ignored. Only tasks with at least one
+fail-to-pass test are kept. Use `--no-build` or `--no-classify` to stop earlier.
 
 ## Development
 

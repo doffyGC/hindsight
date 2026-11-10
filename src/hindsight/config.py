@@ -30,6 +30,7 @@ class ProjectConfig:
 @dataclass(frozen=True)
 class TasksConfig:
     include_ai_assisted: bool = False
+    stability_runs: int = 2
     ai_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_AI_PATTERNS))
 
 
@@ -38,6 +39,8 @@ class EnvironmentConfig:
     strip_instruction_files: list[str] = field(default_factory=lambda: ["CLAUDE.md", "AGENTS.md"])
     spec: EnvironmentSpec = field(default_factory=EnvironmentSpec)
     build_timeout_s: float = 1800
+    test_command: str | None = None  # must write JUnit XML to /out/junit.xml
+    test_timeout_s: float = 900
 
 
 @dataclass(frozen=True)
@@ -87,6 +90,7 @@ def load_config(path: Path) -> Config:
         tasks=TasksConfig(
             include_ai_assisted=bool(tasks_raw.get("include_ai_assisted", False)),
             ai_patterns=list(tasks_raw.get("ai_patterns") or DEFAULT_AI_PATTERNS),
+            stability_runs=_positive_int(tasks_raw, "stability_runs", 2),
         ),
         environment=EnvironmentConfig(
             strip_instruction_files=(
@@ -94,6 +98,8 @@ def load_config(path: Path) -> Config:
             ),
             spec=_environment_spec(env_raw),
             build_timeout_s=float(env_raw.get("build_timeout_s", 1800)),
+            test_command=_test_command(env_raw),
+            test_timeout_s=float(env_raw.get("test_timeout_s", 900)),
         ),
         workdir=(path.parent / str(raw.get("workdir", ".hindsight"))).resolve(),
         raw=raw,
@@ -111,6 +117,25 @@ def _environment_spec(env_raw: dict[str, Any]) -> EnvironmentSpec:
         system_packages=(
             tuple(str(p) for p in packages) if packages is not None else defaults.system_packages
         ),
-        setup=str(env_raw.get("setup", "")),
         build_env={str(k): str(v) for k, v in build_env.items()},
+        deps_setup=str(env_raw.get("deps_setup", "")),
+        deps_ref=str(env_raw.get("deps_ref", defaults.deps_ref)),
+        setup=str(env_raw.get("setup", "")),
     )
+
+
+def _test_command(env_raw: dict[str, Any]) -> str | None:
+    command = env_raw.get("test_command")
+    if command is None:
+        return None
+    command = str(command).strip()
+    if "/out/junit.xml" not in command:
+        raise ConfigError("environment.test_command must write JUnit XML to /out/junit.xml")
+    return command
+
+
+def _positive_int(section: dict[str, Any], key: str, default: int) -> int:
+    value = section.get(key, default)
+    if not isinstance(value, int) or value < 1:
+        raise ConfigError(f"{key} must be a positive integer")
+    return value

@@ -95,3 +95,32 @@ def test_strips_symlinked_instruction_files(repo: Path, tmp_path: Path) -> None:
     assert snap.stripped_files == ("AGENTS.md", "CLAUDE.md")
     assert not (snap.workdir / "CLAUDE.md").is_symlink()
     assert "CLAUDE.md" not in _git(snap.workdir, "ls-files")
+
+
+def test_reference_patch_holds_only_source_changes(repo: Path, candidate, tmp_path: Path) -> None:
+    snap = build_snapshot(repo, candidate, tmp_path / "task")
+    patch = snap.reference_patch.read_text()
+    assert "pkg/core.py" in patch and "+x = 2" in patch
+    assert "tests/" not in patch
+    applied = subprocess.run(
+        ["git", "-C", str(snap.workdir), "apply", "--check", str(snap.reference_patch)],
+        capture_output=True,
+    )
+    assert applied.returncode == 0
+
+
+def test_reference_patch_skips_stripped_files(repo: Path, tmp_path: Path) -> None:
+    commit(repo, {"CLAUDE.md": "v1"}, "add rules")
+    commit(repo, {"CLAUDE.md": "v2", "pkg/core.py": "x = 7\n", "tests/test_core.py": "#"}, "fix")
+    found = list_candidates(repo, None, ["tests"], DEFAULT_AI_PATTERNS)
+    fix = next(c for c in found if c.subject == "fix")
+    snap = build_snapshot(repo, fix, tmp_path / "task", strip_files=["CLAUDE.md"])
+    assert "CLAUDE.md" not in snap.reference_patch.read_text()
+
+
+def test_export_tree(repo: Path, tmp_path: Path) -> None:
+    from hindsight.mining.snapshot import export_tree
+
+    tree = export_tree(repo, "HEAD", tmp_path / "src")
+    assert (tmp_path / "src" / "pkg" / "core.py").read_text() == "x = 1\n"
+    assert len(tree) == 40
