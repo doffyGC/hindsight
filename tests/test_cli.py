@@ -44,7 +44,7 @@ def test_mine_no_dry_run_stores_tasks_and_snapshots(repo: Path, tmp_path: Path) 
     cfg = tmp_path / "evals.yaml"
     cfg.write_text(f"project:\n  repo: {repo}\n  test_paths: [tests]\nworkdir: work\n")
 
-    result = runner.invoke(app, ["mine", "--config", str(cfg), "--no-dry-run"])
+    result = runner.invoke(app, ["mine", "--config", str(cfg), "--no-dry-run", "--no-build"])
 
     assert result.exit_code == 0, result.output
     assert "AI-assisted commit: 1" in result.output
@@ -61,7 +61,62 @@ def test_mine_limit_caps_snapshots(repo: Path, tmp_path: Path) -> None:
     cfg = tmp_path / "evals.yaml"
     cfg.write_text(f"project:\n  repo: {repo}\nworkdir: work\n")
 
-    result = runner.invoke(app, ["mine", "--config", str(cfg), "--no-dry-run", "--limit", "2"])
+    result = runner.invoke(
+        app, ["mine", "-c", str(cfg), "--no-dry-run", "--no-build", "--limit", "2"]
+    )
 
     assert result.exit_code == 0, result.output
     assert "Tasks stored: 2" in result.output
+
+
+def test_mine_records_build_outcomes(repo: Path, tmp_path: Path, monkeypatch) -> None:
+    from hindsight import cli
+    from hindsight.mining.environment import DockerBuilder
+
+    from .test_environment import FakeDocker
+
+    docker = FakeDocker(build_code=1, build_out="ERROR: could not install package\n")
+    monkeypatch.setattr(cli, "DockerBuilder", lambda timeout_s: DockerBuilder(runner=docker))
+    commit(repo, {"pkg/core.py": "x = 2\n", "tests/test_core.py": "def t(): 2\n"}, "fix")
+    cfg = tmp_path / "evals.yaml"
+    cfg.write_text(f"project:\n  repo: {repo}\nworkdir: work\n")
+
+    result = runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "build failed: ERROR: could not install package: 1" in result.output
+
+
+def test_mine_stores_image_id_on_success(repo: Path, tmp_path: Path, monkeypatch) -> None:
+    from hindsight import cli
+    from hindsight.mining.environment import DockerBuilder
+    from hindsight.store import Store
+
+    from .test_environment import FakeDocker
+
+    monkeypatch.setattr(cli, "DockerBuilder", lambda timeout_s: DockerBuilder(runner=FakeDocker()))
+    commit(repo, {"pkg/core.py": "x = 2\n", "tests/test_core.py": "def t(): 2\n"}, "fix")
+    cfg = tmp_path / "evals.yaml"
+    cfg.write_text(f"project:\n  repo: {repo}\nworkdir: work\n")
+
+    assert runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run"]).exit_code == 0
+    with Store.open(tmp_path / "work" / "hindsight.sqlite") as store:
+        sha = next(iter((tmp_path / "work" / "tasks").iterdir())).name
+        assert store.get_task(sha).image_digest == "sha256:abc"
+
+
+def test_mine_without_docker_fails_clearly(repo: Path, tmp_path: Path, monkeypatch) -> None:
+    from hindsight import cli
+    from hindsight.mining.environment import CommandResult, DockerBuilder
+
+    def no_daemon(args, timeout):
+        return CommandResult(1, "Cannot connect to the Docker daemon")
+
+    monkeypatch.setattr(cli, "DockerBuilder", lambda timeout_s: DockerBuilder(runner=no_daemon))
+    cfg = tmp_path / "evals.yaml"
+    cfg.write_text(f"project:\n  repo: {repo}\nworkdir: work\n")
+
+    result = runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run"])
+
+    assert result.exit_code == 1
+    assert "--no-build" in result.output

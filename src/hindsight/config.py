@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from hindsight.mining.environment import EnvironmentSpec
+
 DEFAULT_AI_PATTERNS = [
     r"\[(CLAUDE|CODEX|GEMINI|DEEPSEEK|COPILOT|CURSOR)\]",
     r"(?im)^co-authored-by:.*(claude|anthropic|codex|openai|copilot|gemini|cursor)",
@@ -34,6 +36,8 @@ class TasksConfig:
 @dataclass(frozen=True)
 class EnvironmentConfig:
     strip_instruction_files: list[str] = field(default_factory=lambda: ["CLAUDE.md", "AGENTS.md"])
+    spec: EnvironmentSpec = field(default_factory=EnvironmentSpec)
+    build_timeout_s: float = 1800
 
 
 @dataclass(frozen=True)
@@ -88,7 +92,25 @@ def load_config(path: Path) -> Config:
             strip_instruction_files=(
                 list(strip) if strip is not None else ["CLAUDE.md", "AGENTS.md"]
             ),
+            spec=_environment_spec(env_raw),
+            build_timeout_s=float(env_raw.get("build_timeout_s", 1800)),
         ),
         workdir=(path.parent / str(raw.get("workdir", ".hindsight"))).resolve(),
         raw=raw,
+    )
+
+
+def _environment_spec(env_raw: dict[str, Any]) -> EnvironmentSpec:
+    defaults = EnvironmentSpec()
+    build_env = env_raw.get("build_env") or {}
+    if not isinstance(build_env, dict):
+        raise ConfigError("environment.build_env must be a mapping")
+    packages = env_raw.get("system_packages")
+    return EnvironmentSpec(
+        base_image=str(env_raw.get("base_image", defaults.base_image)),
+        system_packages=(
+            tuple(str(p) for p in packages) if packages is not None else defaults.system_packages
+        ),
+        setup=str(env_raw.get("setup", "")),
+        build_env={str(k): str(v) for k, v in build_env.items()},
     )

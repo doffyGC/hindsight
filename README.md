@@ -18,7 +18,7 @@ Early development. The V1.0 requirements are defined and a manual end-to-end spi
 
 | Command | What it does | Status |
 | --- | --- | --- |
-| `mine` | History → fail-to-pass tasks | Candidates, AI-assisted filter, task snapshots, SQLite funnel |
+| `mine` | History → fail-to-pass tasks | Candidates, AI filter, snapshots, Docker images, SQLite funnel |
 | `review` | Human curation of task statements | Planned |
 | `plan` | Cost estimate and minimum detectable effect | Planned |
 | `run` | Run configurations in sandboxes | Planned |
@@ -30,12 +30,14 @@ Early development. The V1.0 requirements are defined and a manual end-to-end spi
 pip install -e ".[dev]"
 git clone https://github.com/tobymao/sqlglot.git ../sqlglot
 hindsight mine --config examples/evals.sqlglot.yaml                         # dry run: counts only
-hindsight mine --config examples/evals.sqlglot.yaml --no-dry-run --limit 5  # snapshots + funnel
+hindsight mine --config examples/evals.sqlglot.yaml --no-dry-run --limit 5  # snapshots, images, funnel
 ```
 
 Snapshots and the SQLite store go to `.hindsight/` next to the config file (`workdir` option).
 Each task gets `work/` (the parent commit in a fresh one-commit repository, without
 instruction files such as CLAUDE.md) and `gold/` (the commit's test files, for the evaluator).
+Each task also gets a Docker image (`hindsight-task:<sha>-<env hash>`) with its dependencies
+installed; gold tests never enter the image. Use `--no-build` to stop after the snapshots.
 
 ## Development
 

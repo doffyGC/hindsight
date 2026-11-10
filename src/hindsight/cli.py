@@ -9,6 +9,7 @@ import typer
 from hindsight import __version__
 from hindsight.config import Config, ConfigError, load_config
 from hindsight.mining.candidates import Candidate, list_candidates
+from hindsight.mining.environment import BuildError, DockerBuilder, DockerUnavailable
 from hindsight.mining.snapshot import SnapshotError, build_snapshot
 from hindsight.store import Outcome, Stage, Store, Task
 
@@ -43,7 +44,7 @@ def _print_funnel(store: Store) -> None:
             typer.echo(f"      - {reason}: {count}")
 
 
-def _snapshot_one(cfg: Config, store: Store, candidate: Candidate) -> None:
+def _snapshot_one(cfg: Config, store: Store, candidate: Candidate) -> bool:
     try:
         snap = build_snapshot(
             cfg.project.repo,
@@ -53,7 +54,7 @@ def _snapshot_one(cfg: Config, store: Store, candidate: Candidate) -> None:
         )
     except SnapshotError as exc:
         store.log(candidate.sha, Stage.SNAPSHOT, Outcome.DISCARDED, str(exc))
-        return
+        return False
     store.log(candidate.sha, Stage.SNAPSHOT, Outcome.PASSED)
     store.upsert_task(
         Task(
@@ -65,6 +66,25 @@ def _snapshot_one(cfg: Config, store: Store, candidate: Candidate) -> None:
             snapshot_path=str(snap.workdir),
         )
     )
+    return True
+
+
+def _build_one(cfg: Config, store: Store, builder: DockerBuilder, candidate: Candidate) -> None:
+    try:
+        image = builder.build(cfg.task_dir(candidate.sha), candidate.sha, cfg.environment.spec)
+    except BuildError as exc:
+        store.log(candidate.sha, Stage.BUILD, Outcome.DISCARDED, _reason(str(exc)))
+        return
+    store.log(candidate.sha, Stage.BUILD, Outcome.PASSED, "cached" if image.cached else None)
+    task = store.get_task(candidate.sha)
+    if task is not None:
+        task.image_digest = image.image_id
+        store.upsert_task(task)
+
+
+def _reason(message: str, limit: int = 160) -> str:
+    """Keep discard reasons short so the funnel groups similar failures."""
+    return message if len(message) <= limit else message[: limit - 1] + "…"
 
 
 @app.command()
@@ -80,7 +100,10 @@ def mine(
         True, help="Only list candidates. Use --no-dry-run to record them and build snapshots."
     ),
     limit: int | None = typer.Option(
-        None, min=1, help="Build snapshots for at most this many candidates (newest first)."
+        None, min=1, help="Process at most this many candidates (newest first)."
+    ),
+    build: bool = typer.Option(
+        True, help="Build a Docker image per task. Use --no-build to stop after snapshots."
     ),
 ) -> None:
     """Mine the git history into fail-to-pass tasks (RF-01 to RF-08, RF-24 to RF-27)."""
@@ -99,6 +122,14 @@ def mine(
         typer.echo(f"Kept for the next stages: {len(kept)}")
         return
 
+    builder = DockerBuilder(timeout_s=cfg.environment.build_timeout_s) if build else None
+    if builder is not None:
+        try:
+            builder.check_available()
+        except DockerUnavailable as exc:
+            typer.secho(f"{exc}. Start Docker or pass --no-build.", fg="red", err=True)
+            raise typer.Exit(code=1) from exc
+
     with Store.open(cfg.store_path) as store:
         for candidate in candidates:
             store.log(candidate.sha, Stage.CANDIDATE, Outcome.PASSED)
@@ -108,9 +139,11 @@ def mine(
                 store.log(candidate.sha, Stage.AI_FILTER, Outcome.PASSED)
 
         selected = kept[:limit] if limit else kept
-        with typer.progressbar(selected, label="Building snapshots") as progress:
+        label = "Snapshots and images" if builder else "Snapshots"
+        with typer.progressbar(selected, label=label) as progress:
             for candidate in progress:
-                _snapshot_one(cfg, store, candidate)
+                if _snapshot_one(cfg, store, candidate) and builder is not None:
+                    _build_one(cfg, store, builder, candidate)
 
         _print_funnel(store)
         typer.echo(f"\nTasks stored: {store.count_tasks()} (in {cfg.store_path})")
