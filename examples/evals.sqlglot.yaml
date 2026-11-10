@@ -1,0 +1,25 @@
+# Example configuration for tobymao/sqlglot, based on spike #1.
+# Fields not yet used by the code are kept to document the V1.0 spec.
+project:
+  repo: ../sqlglot            # path to a local clone, relative to this file
+  since: "2026-01-01"         # "auto" (training cutoff) is planned, not implemented
+  test_paths: [tests]
+
+environment:
+  base_image: python:3.12-slim
+  setup: |
+    pip install -e ".[dev]" pytest   # pytest is not in sqlglot's dev extras
+  build_env:
+    SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"
+  test_command: pytest --junitxml=/out/junit.xml
+  ignore_tests: [tests/test_sqlglotc.py]
+  strip_instruction_files: [CLAUDE.md, AGENTS.md]
+  eval_parallelism: 4
+
+tasks:
+  include_ai_assisted: false
+  statement_sources: [issue, commit, llm_from_tests]
+  issue_provider: github
+
+auth:
+  mode: subscription          # api_key | subscription
