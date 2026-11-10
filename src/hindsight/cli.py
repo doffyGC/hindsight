@@ -164,28 +164,46 @@ def _test_diff(cfg: Config, candidate: Candidate) -> str:
     return result.stdout
 
 
-def _write_statements(cfg: Config, store: Store, candidates: list[Candidate]) -> int:
-    """Give every accepted task without a statement one from the cascade (RF-07)."""
+def _write_statements(
+    cfg: Config, store: Store, candidates: list[Candidate], refresh: bool = False
+) -> tuple[int, int]:
+    """Give accepted tasks a statement from the cascade (RF-07).
+
+    By default only tasks without one; with `refresh`, every task still pending review whose
+    statement was not written by a human. Returns (written, discarded as AI-assisted).
+    """
     by_sha = {c.sha: c for c in candidates}
-    pending = [t for t in store.accepted_tasks() if not t.statement and t.commit_sha in by_sha]
+    pending = [
+        t
+        for t in store.accepted_tasks(curation_status="pending")
+        if t.commit_sha in by_sha
+        and (not t.statement or (refresh and t.statement_source != "human"))
+    ]
     if not pending:
-        return 0
+        return 0, 0
     writer = StatementWriter(
         sources=cfg.tasks.statement_sources,
+        ai_patterns=cfg.tasks.ai_patterns,
         github_repo=_github_repo(cfg),
         min_commit_chars=cfg.tasks.min_commit_message_chars,
         llm_command=cfg.tasks.llm_command,
     )
-    written = 0
+    written = ai_discarded = 0
     for task in pending:
         candidate = by_sha[task.commit_sha]
         statement = writer.write(
             candidate.subject, candidate.message, task.f2p_tests, _test_diff(cfg, candidate)
         )
-        if statement is not None:
-            store.set_statement(task.commit_sha, statement.text, statement.source)
-            written += 1
-    return written
+        if statement is None:
+            continue
+        if statement.ai_disclosed and not cfg.tasks.include_ai_assisted:
+            reason = "AI-assisted commit (disclosed in the issue or PR)"
+            store.log(task.commit_sha, Stage.AI_FILTER, Outcome.DISCARDED, reason)
+            ai_discarded += 1
+            continue
+        store.set_statement(task.commit_sha, statement.text, statement.source)
+        written += 1
+    return written, ai_discarded
 
 
 def _final_stage(build: bool, classify: bool) -> Stage:
@@ -217,6 +235,9 @@ def mine(
     ),
     force: bool = typer.Option(
         False, help="Reprocess candidates that already reached the final stage."
+    ),
+    refresh_statements: bool = typer.Option(
+        False, help="Rewrite statements of tasks pending review (human edits are kept)."
     ),
 ) -> None:
     """Mine the git history into fail-to-pass tasks (RF-01 to RF-08, RF-24 to RF-27)."""
@@ -258,7 +279,8 @@ def mine(
             store.log(candidate.sha, Stage.CANDIDATE, Outcome.PASSED)
             if candidate.ai_assisted and not cfg.tasks.include_ai_assisted:
                 store.log(candidate.sha, Stage.AI_FILTER, Outcome.DISCARDED, "AI-assisted commit")
-            else:
+            elif store.outcome(candidate.sha, Stage.AI_FILTER) is None:
+                # Never overwrite a discard made after reading the issue or PR text.
                 store.log(candidate.sha, Stage.AI_FILTER, Outcome.PASSED)
 
         final = _final_stage(build, classify)
@@ -283,9 +305,11 @@ def mine(
                     _classify_one(cfg, store, tests, candidate, image)
 
         if tests is not None:
-            written = _write_statements(cfg, store, candidates)
+            written, ai_discarded = _write_statements(cfg, store, candidates, refresh_statements)
             if written:
                 typer.echo(f"Statements written: {written}")
+            if ai_discarded:
+                typer.echo(f"Discarded as AI-assisted after reading the issue/PR: {ai_discarded}")
 
         _print_funnel(store)
         typer.echo(f"\nTasks stored: {store.count_tasks()} (in {cfg.store_path})")

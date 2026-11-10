@@ -31,6 +31,10 @@ LLM = "llm_from_tests"
 ALL_SOURCES = (ISSUE, COMMIT, LLM)
 
 _REF_IN_SUBJECT = re.compile(r"\(#(\d+)\)\s*$|#(\d+)\b")
+_CLOSING_REF = re.compile(r"(?i)\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s+#(\d+)\b")
+_SOLUTION_LANGUAGE = re.compile(
+    r"(?i)\b(the fix|this (?:pr|pull request|change|patch|commit)|the patch|verification)\b"
+)
 _GITHUB_REMOTE = re.compile(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/?$")
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{3,}")
 
@@ -56,6 +60,7 @@ CommandRunner = Callable[[Sequence[str], str, float], tuple[int, str]]
 class Statement:
     text: str
     source: str
+    ai_disclosed: bool = False  # the issue/PR text says it was produced with AI help
 
 
 def urllib_get(url: str, headers: dict[str, str]) -> tuple[int, str]:
@@ -104,6 +109,7 @@ class StatementWriter:
     def __init__(
         self,
         sources: Sequence[str] = ALL_SOURCES,
+        ai_patterns: Sequence[str] = (),
         github_repo: str | None = None,
         min_commit_chars: int = 40,
         llm_command: str | None = None,
@@ -115,6 +121,7 @@ class StatementWriter:
         if unknown:
             raise ValueError(f"unknown statement sources: {sorted(unknown)}")
         self._sources = tuple(sources)
+        self._ai_patterns = tuple(ai_patterns)
         self._github_repo = github_repo
         self._min_commit_chars = min_commit_chars
         self._llm_command = llm_command
@@ -126,20 +133,20 @@ class StatementWriter:
         self, subject: str, message: str, f2p_tests: Sequence[str], test_diff: str
     ) -> Statement | None:
         for source in self._sources:
+            disclosed = False
             if source == ISSUE:
-                text = self._from_issue(subject)
+                text, disclosed = self._from_issue(subject)
             elif source == COMMIT:
                 text = self._from_commit(message)
             else:
                 text = self._from_llm(f2p_tests, test_diff)
+            if disclosed:
+                return Statement(text or "", source, ai_disclosed=True)
             if text:
                 return Statement(text, source)
         return None
 
-    def _from_issue(self, subject: str) -> str | None:
-        number = referenced_number(subject)
-        if number is None or not self._github_repo:
-            return None
+    def _fetch(self, number: int) -> str | None:
         headers = {"Accept": "application/vnd.github+json", "User-Agent": "hindsight-evals"}
         if token := os.environ.get("GITHUB_TOKEN"):
             headers["Authorization"] = f"Bearer {token}"
@@ -152,6 +159,22 @@ class StatementWriter:
         text = (data.get("body") or "").strip()
         combined = f"{title}\n\n{text}".strip() if text else title
         return combined or None
+
+    def _from_issue(self, subject: str) -> tuple[str | None, bool]:
+        """Prefer the issue a PR closes ("Fixes #8955"): it describes the problem, not the fix."""
+        number = referenced_number(subject)
+        if number is None or not self._github_repo:
+            return None, False
+        referenced = self._fetch(number)
+        if referenced is None:
+            return None, False
+        disclosed = any(re.search(p, referenced) for p in self._ai_patterns)
+        closing = _CLOSING_REF.search(referenced)
+        if closing and int(closing.group(1)) != number:
+            original = self._fetch(int(closing.group(1)))
+            if original:
+                return original, disclosed
+        return referenced, disclosed
 
     def _from_commit(self, message: str) -> str | None:
         text = message.strip()
@@ -180,32 +203,29 @@ def _code_like(name: str, context: str) -> bool:
 def leakage_hints(statement: str, reference_patch: str, gold_tests_text: str) -> list[str]:
     """Flag parts of the statement that look like the solution rather than the problem.
 
-    - identifiers added by the reference patch that the tests never use;
-    - code fragments copied from added lines of the patch.
-    Identifiers the tests use are fine: they describe *what* is expected.
+    - code names from the reference patch (added, removed or surrounding lines, hunk headers)
+      that the tests never use: they point at *where* or *how* to change the code;
+    - code fragments copied from added lines of the patch;
+    - wording that describes the change itself ("the fix", "this PR").
+    Names the tests use are fine: they describe *what* is expected.
     """
-    added = [
-        line[1:]
-        for line in reference_patch.splitlines()
-        if line.startswith("+") and not line.startswith("+++")
-    ]
-    removed = [
-        line[1:]
-        for line in reference_patch.splitlines()
-        if line.startswith("-") and not line.startswith("---")
-    ]
-    added_text = "\n".join(added)
-    added_ids = {name for name in _IDENTIFIER.findall(added_text) if _code_like(name, added_text)}
-    known_ids = set(_IDENTIFIER.findall("\n".join(removed))) | set(
-        _IDENTIFIER.findall(gold_tests_text)
+    lines = reference_patch.splitlines()
+    added = [line[1:] for line in lines if line.startswith("+") and not line.startswith("+++")]
+    body = "\n".join(
+        line for line in lines if not line.startswith(("+++", "---", "diff ", "index "))
     )
+    patch_ids = {name for name in _IDENTIFIER.findall(body) if _code_like(name, body)}
+    test_ids = set(_IDENTIFIER.findall(gold_tests_text))
     hints = [
-        f"mentions '{name}', which the fix adds but the tests never use"
-        for name in sorted(added_ids - known_ids)
-        if re.search(rf"\b{re.escape(name)}\b", statement)
+        f"mentions '{name}', code the fix touches but the tests never use"
+        for name in sorted(patch_ids - test_ids)
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", statement)
     ]
     for line in added:
         fragment = line.strip()
         if len(fragment) >= 15 and fragment in statement:
             hints.append(f"copies code from the fix: '{fragment[:60]}'")
+    phrases = sorted({m.group(1).lower() for m in _SOLUTION_LANGUAGE.finditer(statement)})
+    if phrases:
+        hints.append("describes the change itself: " + ", ".join(f"'{p}'" for p in phrases))
     return hints

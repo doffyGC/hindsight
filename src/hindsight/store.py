@@ -216,8 +216,10 @@ class Store:
         """Tasks that passed fail-to-pass classification, oldest commit first."""
         query = """SELECT t.commit_sha FROM tasks t
                    JOIN mining_log m ON m.commit_sha = t.commit_sha
-                   WHERE m.stage = ? AND m.outcome = 'passed'"""
-        params: list[str] = [str(Stage.FAIL_TO_PASS)]
+                   WHERE m.stage = ? AND m.outcome = 'passed'
+                   AND NOT EXISTS (SELECT 1 FROM mining_log a WHERE a.commit_sha = t.commit_sha
+                                   AND a.stage = ? AND a.outcome = 'discarded')"""
+        params: list[str] = [str(Stage.FAIL_TO_PASS), str(Stage.AI_FILTER)]
         if curation_status is not None:
             query += " AND t.curation_status = ?"
             params.append(curation_status)

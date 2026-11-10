@@ -293,3 +293,73 @@ def test_review_without_mining_fails(tmp_path: Path, repo: Path) -> None:
     cfg = tmp_path / "evals.yaml"
     cfg.write_text(f"project:\n  repo: {repo}\nworkdir: work\n")
     assert runner.invoke(app, ["review", "-c", str(cfg)]).exit_code == 1
+
+
+def _with_github(monkeypatch, items: dict[int, dict]) -> None:
+    import functools
+
+    from hindsight import cli
+    from hindsight.mining.statements import StatementWriter
+
+    from .test_statements import FakeGitHub
+
+    monkeypatch.setattr(
+        cli, "StatementWriter", functools.partial(StatementWriter, http_get=FakeGitHub(items))
+    )
+
+
+def _github_config(repo: Path, tmp_path: Path) -> Path:
+    cfg = tmp_path / "evals.yaml"
+    cfg.write_text(
+        f"project:\n  repo: {repo}\nworkdir: work\n"
+        "environment:\n  test_command: pytest --junitxml=/out/junit.xml\n"
+        "tasks:\n  github_repo: o/r\n"
+    )
+    return cfg
+
+
+def test_mine_discards_tasks_whose_pr_discloses_ai(repo: Path, tmp_path: Path, monkeypatch):
+    from hindsight import cli
+    from hindsight.mining.environment import DockerBuilder
+    from hindsight.store import Store
+
+    monkeypatch.setattr(cli, "DockerBuilder", lambda timeout_s: DockerBuilder(runner=_f2p_docker()))
+    _with_github(monkeypatch, {7: {"title": "fix", "body": "Produced with AI assistance."}})
+    commit(repo, {"pkg/core.py": "x = 2\n", "tests/test_core.py": "def t(): 2\n"}, "fix (#7)")
+
+    result = runner.invoke(app, ["mine", "-c", str(_github_config(repo, tmp_path)), "--no-dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "Discarded as AI-assisted after reading the issue/PR: 1" in result.output
+    with Store.open(tmp_path / "work" / "hindsight.sqlite") as store:
+        assert store.accepted_tasks() == []
+
+    again = runner.invoke(app, ["mine", "-c", str(_github_config(repo, tmp_path)), "--no-dry-run"])
+    assert again.exit_code == 0, again.output
+    with Store.open(tmp_path / "work" / "hindsight.sqlite") as store:
+        assert store.accepted_tasks() == []  # a later run must not bring it back
+
+
+def test_refresh_statements_keeps_human_edits(repo: Path, tmp_path: Path, monkeypatch):
+    from hindsight import cli
+    from hindsight.mining.environment import DockerBuilder
+    from hindsight.store import Store
+
+    monkeypatch.setattr(cli, "DockerBuilder", lambda timeout_s: DockerBuilder(runner=_f2p_docker()))
+    commit(repo, {"pkg/core.py": "x = 2\n", "tests/test_core.py": "def t(): 2\n"}, "fix (#7)")
+    commit(repo, {"pkg/core.py": "x = 3\n", "tests/test_core.py": "def t(): 3\n"}, "fix (#8)")
+    cfg = _github_config(repo, tmp_path)
+    _with_github(monkeypatch, {7: {"title": "PR seven"}, 8: {"title": "PR eight"}})
+    assert runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run"]).exit_code == 0
+    with Store.open(tmp_path / "work" / "hindsight.sqlite") as store:
+        seven = next(t for t in store.accepted_tasks() if t.subject == "fix (#7)")
+        store.set_statement(seven.commit_sha, "Edited by a human.", "human")
+
+    _with_github(monkeypatch, {7: {"title": "issue seven v2"}, 8: {"title": "issue eight v2"}})
+    args = ["mine", "-c", str(cfg), "--no-dry-run", "--refresh-statements"]
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 0, result.output
+    with Store.open(tmp_path / "work" / "hindsight.sqlite") as store:
+        statements = {t.subject: t.statement for t in store.accepted_tasks()}
+    assert statements == {"fix (#7)": "Edited by a human.", "fix (#8)": "issue eight v2"}

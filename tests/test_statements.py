@@ -129,3 +129,63 @@ def test_leakage_hints_flag_copied_code() -> None:
 def test_clean_statement_has_no_hints() -> None:
     clean = "Indexes in exponent form like $[2E] must be reported as a ParseError."
     assert leakage_hints(clean, PATCH, GOLD) == []
+
+
+class FakeGitHub:
+    def __init__(self, items: dict[int, dict]):
+        self.items, self.urls = items, []
+
+    def __call__(self, url: str, headers: dict[str, str]) -> tuple[int, str]:
+        self.urls.append(url)
+        number = int(url.rsplit("/", 1)[1])
+        if number not in self.items:
+            return 404, ""
+        return 200, json.dumps(self.items[number])
+
+
+def test_pr_is_followed_to_the_issue_it_closes() -> None:
+    github = FakeGitHub(
+        {
+            8959: {"title": "fix(duckdb): ...", "body": "Fixes #8955.\n\nThe fix parses ..."},
+            8955: {"title": "Nested INITCAP fails", "body": "INITCAP(INITCAP(x)) raises."},
+        }
+    )
+    writer = StatementWriter(github_repo="o/r", http_get=github)
+    statement = writer.write("fix(duckdb): parse INITCAP (#8959)", "", [], "")
+    assert statement.text == "Nested INITCAP fails\n\nINITCAP(INITCAP(x)) raises."
+    assert statement.source == "issue" and not statement.ai_disclosed
+
+
+def test_ai_disclosure_in_pr_is_reported() -> None:
+    from hindsight.config import DEFAULT_AI_PATTERNS
+
+    body = "Fixes #8955.\n\nThis PR was produced with AI assistance (WorkBuddy)."
+    github = FakeGitHub({8959: {"title": "fix", "body": body}, 8955: {"title": "bug"}})
+    writer = StatementWriter(github_repo="o/r", http_get=github, ai_patterns=DEFAULT_AI_PATTERNS)
+    assert writer.write("fix (#8959)", "", [], "").ai_disclosed
+
+
+INITCAP_PATCH = """--- a/sqlglot/dialects/duckdb.py
++++ b/sqlglot/dialects/duckdb.py
+@@ -120,6 +120,6 @@ def _build_capitalization_sql(self, expression):
+     value_to_split = self.sql(expression, "this")
+-    case = exp.case().when(cond, maybe_parse(value_to_split))
++    case = exp.case().when(cond, maybe_parse(value_to_split, dialect="duckdb"))
+"""
+INITCAP_TESTS = "def test_initcap(self):\n    self.validate_all('INITCAP(INITCAP(x))')\n"
+
+
+def test_hints_flag_existing_code_names_and_solution_language() -> None:
+    statement = (
+        "Nested INITCAP raises ParseError. `_build_capitalization_sql` passes strings to "
+        "`maybe_parse` with the default dialect. The fix parses them with dialect='duckdb'."
+    )
+    hints = leakage_hints(statement, INITCAP_PATCH, INITCAP_TESTS)
+    assert any("'_build_capitalization_sql'" in h for h in hints)
+    assert any("'maybe_parse'" in h for h in hints)
+    assert any("'the fix'" in h for h in hints)
+
+
+def test_problem_only_statement_has_no_hints() -> None:
+    statement = "Generating DuckDB SQL for nested INITCAP, e.g. INITCAP(INITCAP(x)), fails."
+    assert leakage_hints(statement, INITCAP_PATCH, INITCAP_TESTS) == []

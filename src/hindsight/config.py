@@ -10,9 +10,16 @@ import yaml
 
 from hindsight.mining.environment import EnvironmentSpec
 
+_AI_TOOLS = (
+    "claude|anthropic|codex|openai|chatgpt|copilot|gemini|cursor|deepseek|workbuddy|hunyuan"
+    "|aider|windsurf|cline"  # no tools that are also common first names (Devin, Jules)
+)
 DEFAULT_AI_PATTERNS = [
-    r"\[(CLAUDE|CODEX|GEMINI|DEEPSEEK|COPILOT|CURSOR)\]",
-    r"(?im)^co-authored-by:.*(claude|anthropic|codex|openai|copilot|gemini|cursor)",
+    rf"(?i)\[({_AI_TOOLS})\]",
+    rf"(?im)^co-authored-by:.*\b({_AI_TOOLS})\b",
+    r"(?i)\b(produced|generated|written|created|authored)\s+(with|by|using)\s+"
+    r"(the\s+)?(help\s+of\s+)?(an?\s+)?(ai|llm|" + _AI_TOOLS + r")\b",
+    r"(?i)\bai[- ]assist(ed|ance)\b",
 ]
 
 
