@@ -189,3 +189,12 @@ def test_hints_flag_existing_code_names_and_solution_language() -> None:
 def test_problem_only_statement_has_no_hints() -> None:
     statement = "Generating DuckDB SQL for nested INITCAP, e.g. INITCAP(INITCAP(x)), fails."
     assert leakage_hints(statement, INITCAP_PATCH, INITCAP_TESTS) == []
+
+
+def test_hints_flag_reporters_guessing_the_cause() -> None:
+    statement = (
+        "Typed integer division drops the NULLIF guard. I think the cause is in the generator; "
+        "using the right operand there fixes it."
+    )
+    hints = leakage_hints(statement, "", "")
+    assert any("'the cause'" in h and "'fixes it'" in h for h in hints)

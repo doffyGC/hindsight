@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import getpass
+import os
+import shlex
+import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +28,24 @@ class ReviewSummary:
     discarded: int = 0
     skipped: int = 0
     stopped_early: bool = False
+
+
+def open_in_editor(text: str) -> str | None:
+    """Edit `text` in $VISUAL or $EDITOR (falling back to nano, then vi); None if unchanged."""
+    command = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if not command:
+        command = next((name for name in ("nano", "vi") if shutil.which(name)), None)
+    if not command:
+        raise RuntimeError("no editor found; set the EDITOR environment variable")
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as tmp:
+        tmp.write(text)
+        path = Path(tmp.name)
+    try:
+        subprocess.run([*shlex.split(command), str(path)], check=True)
+        edited = path.read_text(encoding="utf-8")
+    finally:
+        path.unlink(missing_ok=True)
+    return None if edited == text else edited
 
 
 def reviewer_name(repo: Path | None = None) -> str:
@@ -103,6 +125,7 @@ def run_review(
                     echo("This task has no statement; edit it first.")
                     continue
                 store.set_curation(task.commit_sha, "approved", reviewer)
+                store.commit()
                 summary.approved += 1
                 break
             if choice == "e":
@@ -111,10 +134,12 @@ def run_review(
                     task.statement = edited.strip()
                     task.statement_source = "human"
                     store.set_statement(task.commit_sha, task.statement, "human")
+                    store.commit()
                 _show(task, task_dir, index, len(tasks), echo, link)
                 continue
             if choice == "d":
                 store.set_curation(task.commit_sha, "discarded", reviewer)
+                store.commit()
                 summary.discarded += 1
                 break
             if choice == "v":

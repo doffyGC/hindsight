@@ -113,6 +113,10 @@ class Store:
         finally:
             connection.close()
 
+    def commit(self) -> None:
+        """Persist pending changes now (used by interactive commands after each decision)."""
+        self._db.commit()
+
     # mining_log ------------------------------------------------------------------------
 
     def log(self, commit_sha: str, stage: Stage, outcome: Outcome, reason: str | None = None):

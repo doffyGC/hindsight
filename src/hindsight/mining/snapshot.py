@@ -102,7 +102,13 @@ def build_snapshot(
     """
     strip_files = tuple(strip_files)
     if dest.exists():
-        shutil.rmtree(dest)
+        try:
+            shutil.rmtree(dest)
+        except OSError as exc:
+            raise SnapshotError(
+                f"cannot replace the previous snapshot ({exc.strerror}: {exc.filename}); "
+                "a leftover Docker container may still be using it"
+            ) from exc
     workdir, gold_dir, ref_dir = dest / "work", dest / "gold", dest / "reference"
     workdir.mkdir(parents=True)
     gold_dir.mkdir()

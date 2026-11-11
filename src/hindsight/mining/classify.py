@@ -97,6 +97,26 @@ def classify(before: dict[str, Status], after_runs: list[dict[str, Status]]) -> 
     return Classification(tuple(f2p), tuple(p2p), tuple(flaky))
 
 
+def remove_orphan_containers(runner: Runner) -> int:
+    """Remove test containers left behind by an interrupted run; return how many."""
+    listed = runner(
+        [
+            "docker",
+            "ps",
+            "-aq",
+            "--filter",
+            "name=^hindsight-before-",
+            "--filter",
+            "name=^hindsight-after-",
+        ],
+        60,
+    )
+    ids = listed.output.split() if listed.returncode == 0 else []
+    if ids:
+        runner(["docker", "rm", "-f", *ids], 120)
+    return len(ids)
+
+
 class GoldTestRunner:
     def __init__(self, runner: Runner, test_command: str, timeout_s: float = 900) -> None:
         self._run = runner

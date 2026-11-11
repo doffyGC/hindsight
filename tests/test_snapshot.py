@@ -124,3 +124,19 @@ def test_export_tree(repo: Path, tmp_path: Path) -> None:
     tree = export_tree(repo, "HEAD", tmp_path / "src")
     assert (tmp_path / "src" / "pkg" / "core.py").read_text() == "x = 1\n"
     assert len(tree) == 40
+
+
+def test_unremovable_previous_snapshot_becomes_a_discard(
+    repo: Path, candidate, tmp_path: Path, monkeypatch
+) -> None:
+    import shutil
+
+    dest = tmp_path / "task"
+    build_snapshot(repo, candidate, dest)
+
+    def locked(path, *args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(dest / "gold"))
+
+    monkeypatch.setattr(shutil, "rmtree", locked)
+    with pytest.raises(SnapshotError, match="leftover Docker container"):
+        build_snapshot(repo, candidate, dest)

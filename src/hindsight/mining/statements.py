@@ -33,7 +33,8 @@ ALL_SOURCES = (ISSUE, COMMIT, LLM)
 _REF_IN_SUBJECT = re.compile(r"\(#(\d+)\)\s*$|#(\d+)\b")
 _CLOSING_REF = re.compile(r"(?i)\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s+#(\d+)\b")
 _SOLUTION_LANGUAGE = re.compile(
-    r"(?i)\b(the fix|this (?:pr|pull request|change|patch|commit)|the patch|verification)\b"
+    r"(?i)\b(the fix|fix(?:es)? (?:it|this|the (?:issue|bug|problem))|the (?:root )?cause"
+    r"|this (?:pr|pull request|change|patch|commit)|the patch|verification)\b"
 )
 _GITHUB_REMOTE = re.compile(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/?$")
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{3,}")

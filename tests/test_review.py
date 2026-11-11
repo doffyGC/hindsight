@@ -80,3 +80,48 @@ def test_empty_queue(tmp_path: Path) -> None:
     with Store.open(tmp_path / "empty.sqlite") as store:
         summary, output = _review(store, tmp_path, [])
     assert "No tasks waiting for review." in output and summary.approved == 0
+
+
+def test_decisions_survive_a_crash_mid_review(tmp_path: Path) -> None:
+    path = tmp_path / "h.sqlite"
+    with Store.open(path) as store:
+        for sha in ("aaa", "bbb"):
+            store.upsert_task(Task(sha, "p", "2026-11-01", sha, f2p_tests=["t::x"]))
+            store.set_statement(sha, "Fix it.", "commit")
+            store.log(sha, Stage.FAIL_TO_PASS, Outcome.PASSED)
+
+    replies = iter(["a"])
+
+    def prompt(_: str) -> str:
+        try:
+            return next(replies)
+        except StopIteration:
+            raise KeyboardInterrupt from None  # e.g. the user hits Ctrl+C on the second task
+
+    with pytest.raises(KeyboardInterrupt):
+        with Store.open(path) as store:
+            run_review(store, lambda s: tmp_path / s, prompt, lambda _: None, lambda t: t, "gui")
+
+    with Store.open(path) as store:
+        assert store.get_task("aaa").curation_status == "approved"
+        assert store.get_task("bbb").curation_status == "pending"
+
+
+def test_open_in_editor_uses_editor_variable(tmp_path: Path, monkeypatch) -> None:
+    from hindsight.review import open_in_editor
+
+    fake_editor = tmp_path / "fake-editor.sh"
+    fake_editor.write_text('#!/bin/sh\nprintf "Only the problem." > "$1"\n')
+    fake_editor.chmod(0o755)
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.setenv("EDITOR", str(fake_editor))
+
+    assert open_in_editor("Problem.\n\nI think the cause is X.") == "Only the problem."
+
+
+def test_open_in_editor_returns_none_when_unchanged(tmp_path: Path, monkeypatch) -> None:
+    from hindsight.review import open_in_editor
+
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.setenv("EDITOR", "true")  # exits without touching the file
+    assert open_in_editor("same text") is None

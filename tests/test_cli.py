@@ -363,3 +363,29 @@ def test_refresh_statements_keeps_human_edits(repo: Path, tmp_path: Path, monkey
     with Store.open(tmp_path / "work" / "hindsight.sqlite") as store:
         statements = {t.subject: t.statement for t in store.accepted_tasks()}
     assert statements == {"fix (#7)": "Edited by a human.", "fix (#8)": "issue eight v2"}
+
+
+def test_review_command_edits_with_real_editor(repo: Path, tmp_path: Path, monkeypatch) -> None:
+    from hindsight import cli
+    from hindsight.mining.environment import DockerBuilder
+    from hindsight.store import Store
+
+    monkeypatch.setattr(cli, "DockerBuilder", lambda timeout_s: DockerBuilder(runner=_f2p_docker()))
+    message = "fix: x must be 2\n\nCallers expect x to be two. I think the cause is in core.py."
+    commit(repo, {"pkg/core.py": "x = 2\n", "tests/test_core.py": "def t(): 2\n"}, message)
+    cfg = _f2p_config(repo, tmp_path)
+    assert runner.invoke(app, ["mine", "-c", str(cfg), "--no-dry-run"]).exit_code == 0
+    editor = tmp_path / "editor.sh"
+    editor.write_text('#!/bin/sh\nprintf "Callers expect x to be two." > "$1"\n')
+    editor.chmod(0o755)
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.setenv("EDITOR", str(editor))
+
+    result = runner.invoke(app, ["review", "-c", str(cfg)], input="e\na\n")
+
+    assert result.exit_code == 0, result.output
+    assert "'the cause'" in result.output  # hint shown before the edit
+    with Store.open(tmp_path / "work" / "hindsight.sqlite") as store:
+        task = store.accepted_tasks()[0]
+    assert (task.statement, task.statement_source) == ("Callers expect x to be two.", "human")
+    assert task.curation_status == "approved"

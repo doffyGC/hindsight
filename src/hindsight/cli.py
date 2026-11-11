@@ -10,11 +10,11 @@ import typer
 from hindsight import __version__
 from hindsight.config import Config, ConfigError, load_config
 from hindsight.mining.candidates import Candidate, list_candidates
-from hindsight.mining.classify import GoldTestError, GoldTestRunner
+from hindsight.mining.classify import GoldTestError, GoldTestRunner, remove_orphan_containers
 from hindsight.mining.environment import BuildError, DockerBuilder, DockerUnavailable
 from hindsight.mining.snapshot import SnapshotError, build_snapshot, export_tree
 from hindsight.mining.statements import StatementWriter, github_repo_from_remote
-from hindsight.review import reviewer_name, run_review
+from hindsight.review import open_in_editor, reviewer_name, run_review
 from hindsight.store import Outcome, Stage, Store, Task
 
 app = typer.Typer(
@@ -272,6 +272,10 @@ def mine(
             typer.secho(f"{exc}. Start Docker or pass --no-build.", fg="red", err=True)
             raise typer.Exit(code=1) from exc
 
+    if builder is not None:
+        removed = remove_orphan_containers(builder.runner)
+        if removed:
+            typer.echo(f"Removed {removed} test containers left by an interrupted run.")
     deps_image = _build_deps(cfg, builder) if builder is not None else None
 
     with Store.open(cfg.store_path) as store:
@@ -331,7 +335,7 @@ def review(config: Path = CONFIG_OPTION) -> None:
             cfg.task_dir,
             prompt=lambda text: typer.prompt(text, default="s", show_default=False),
             echo=typer.echo,
-            editor=lambda text: typer.edit(text, extension=".md"),
+            editor=open_in_editor,
             reviewer=reviewer_name(cfg.project.repo),
             github_repo=_github_repo(cfg),
         )

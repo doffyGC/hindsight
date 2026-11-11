@@ -82,6 +82,8 @@ class FakeTestDocker:
     def __call__(self, args: Sequence[str], timeout: float | None) -> CommandResult:
         args = list(args)
         self.calls.append(args)
+        if args[:2] == ["docker", "ps"]:
+            return CommandResult(0, getattr(self, "orphans", ""))
         if args[:2] == ["docker", "version"]:
             return CommandResult(0, "27")
         if args[:3] == ["docker", "image", "inspect"]:
@@ -225,3 +227,20 @@ def test_real_end_to_end_mining(tmp_path: Path) -> None:
         ).stdout.split()
         if images:
             subprocess.run(["docker", "image", "rm", "-f", *images], capture_output=True)
+
+
+def test_orphan_containers_are_removed() -> None:
+    from hindsight.mining.classify import remove_orphan_containers
+
+    docker = FakeTestDocker({})
+    docker.orphans = "abc123\ndef456\n"
+    assert remove_orphan_containers(docker) == 2
+    assert ["docker", "rm", "-f", "abc123", "def456"] in docker.calls
+
+
+def test_no_orphans_means_no_removal() -> None:
+    from hindsight.mining.classify import remove_orphan_containers
+
+    docker = FakeTestDocker({})
+    assert remove_orphan_containers(docker) == 0
+    assert docker.removed() == 0

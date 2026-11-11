@@ -37,6 +37,8 @@ class FakeDocker:
     def __call__(self, args: Sequence[str], timeout: float | None) -> CommandResult:
         args = list(args)
         self.calls.append(args)
+        if args[:2] == ["docker", "ps"]:
+            return CommandResult(0, getattr(self, "orphans", ""))
         if args[:2] == ["docker", "version"]:
             return CommandResult(0, "27.0.0")
         if args[:3] == ["docker", "image", "inspect"]:
