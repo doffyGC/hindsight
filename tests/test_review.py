@@ -125,3 +125,27 @@ def test_open_in_editor_returns_none_when_unchanged(tmp_path: Path, monkeypatch)
     monkeypatch.delenv("VISUAL", raising=False)
     monkeypatch.setenv("EDITOR", "true")  # exits without touching the file
     assert open_in_editor("same text") is None
+
+
+def test_tests_option_and_required_names(tmp_path: Path) -> None:
+    with Store.open(tmp_path / "h.sqlite") as store:
+        task = Task(
+            "aaa",
+            "p",
+            "2026-11-01",
+            "feat: options",
+            f2p_tests=["tests.test_x.T::test_new"],
+            gold_test_files=["tests/test_x.py"],
+        )
+        store.upsert_task(task)
+        store.set_statement("aaa", "OPTIONS clauses should parse.", "issue")
+        store.log("aaa", Stage.FAIL_TO_PASS, Outcome.PASSED)
+        (tmp_path / "aaa/work/tests").mkdir(parents=True)
+        (tmp_path / "aaa/gold/tests").mkdir(parents=True)
+        (tmp_path / "aaa/gold/tests/test_x.py").write_text(
+            "class T:\n    def test_new(self):\n        assert find(exp.OptionsProperty)\n"
+        )
+        summary, output = _review(store, tmp_path, ["t", "q"])
+    assert "? OptionsProperty" in output
+    assert "def test_new(self):" in output
+    assert summary.stopped_early

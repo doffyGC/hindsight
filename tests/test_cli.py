@@ -389,3 +389,30 @@ def test_review_command_edits_with_real_editor(repo: Path, tmp_path: Path, monke
         task = store.accepted_tasks()[0]
     assert (task.statement, task.statement_source) == ("Callers expect x to be two.", "human")
     assert task.curation_status == "approved"
+
+
+def test_mine_keeps_finished_tasks_when_interrupted(
+    repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from hindsight import cli
+    from hindsight.mining.environment import DockerBuilder
+    from hindsight.store import Stage, Store
+
+    monkeypatch.setattr(cli, "DockerBuilder", lambda timeout_s: DockerBuilder(runner=_f2p_docker()))
+    commit(repo, {"pkg/core.py": "x = 2\n", "tests/test_core.py": "def t(): 2\n"}, "first")
+    commit(repo, {"pkg/core.py": "x = 3\n", "tests/test_core.py": "def t(): 3\n"}, "second")
+    real_classify = cli._classify_one
+    calls = {"n": 0}
+
+    def classify_then_power_off(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise KeyboardInterrupt  # stands in for the computer shutting down
+        return real_classify(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_classify_one", classify_then_power_off)
+    runner.invoke(app, ["mine", "-c", str(_f2p_config(repo, tmp_path)), "--no-dry-run"])
+
+    with Store.open(tmp_path / "work" / "hindsight.sqlite") as store:
+        f2p = next(r for r in store.funnel() if r.stage == Stage.FAIL_TO_PASS)
+    assert f2p.passed == 1  # the first task survived the interruption

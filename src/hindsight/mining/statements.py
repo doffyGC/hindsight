@@ -31,7 +31,11 @@ LLM = "llm_from_tests"
 ALL_SOURCES = (ISSUE, COMMIT, LLM)
 
 _REF_IN_SUBJECT = re.compile(r"\(#(\d+)\)\s*$|#(\d+)\b")
-_CLOSING_REF = re.compile(r"(?i)\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s+#(\d+)\b")
+_CLOSING_REF = re.compile(
+    r"(?i)\b(?:fix(?:es|ed)?|close[sd]?|resolve[sd]?)\s+#(\d+)\b"
+    r"|(?:fix|issue)[^\n]{0,20}?github\.com/[^/\s]+/[^/\s]+/issues/(\d+)"
+)
+_COMMIT_TITLE = re.compile(r"^(?:fix|feat|refactor|perf|chore|build)(?:\([^)]*\))?!?:\s")
 _SOLUTION_LANGUAGE = re.compile(
     r"(?i)\b(the fix|fix(?:es)? (?:it|this|the (?:issue|bug|problem))|the (?:root )?cause"
     r"|this (?:pr|pull request|change|patch|commit)|the patch|verification)\b"
@@ -171,8 +175,9 @@ class StatementWriter:
             return None, False
         disclosed = any(re.search(p, referenced) for p in self._ai_patterns)
         closing = _CLOSING_REF.search(referenced)
-        if closing and int(closing.group(1)) != number:
-            original = self._fetch(int(closing.group(1)))
+        closed = int(closing.group(1) or closing.group(2)) if closing else None
+        if closed is not None and closed != number:
+            original = self._fetch(closed)
             if original:
                 return original, disclosed
         return referenced, disclosed
@@ -217,11 +222,18 @@ def leakage_hints(statement: str, reference_patch: str, gold_tests_text: str) ->
     )
     patch_ids = {name for name in _IDENTIFIER.findall(body) if _code_like(name, body)}
     test_ids = set(_IDENTIFIER.findall(gold_tests_text))
+    test_text = gold_tests_text.lower()
     hints = [
         f"mentions '{name}', code the fix touches but the tests never use"
         for name in sorted(patch_ids - test_ids)
-        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", statement)
+        # names the tests contain, even inside a longer name or a string ("test_unnest_subqueries",
+        # dialect="teradata"), describe what is expected, not how to build it
+        if name.lower() not in test_text
+        and re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", statement)
     ]
+    first_line = statement.strip().splitlines()[0] if statement.strip() else ""
+    if _COMMIT_TITLE.match(first_line):
+        hints.append("starts with a commit-style title, which usually describes the change")
     for line in added:
         fragment = line.strip()
         if len(fragment) >= 15 and fragment in statement:

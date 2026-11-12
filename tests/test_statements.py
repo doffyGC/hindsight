@@ -198,3 +198,29 @@ def test_hints_flag_reporters_guessing_the_cause() -> None:
     )
     hints = leakage_hints(statement, "", "")
     assert any("'the cause'" in h and "'fixes it'" in h for h in hints)
+
+
+def test_issue_links_are_followed_like_fixes_keywords() -> None:
+    body = "Summary\n\nFix for issue: https://github.com/o/r/issues/8916\n\n## Changes\n- add X"
+    github = FakeGitHub(
+        {
+            8917: {"title": "feat: ignore grants", "body": body},
+            8916: {"title": "IGNORE GRANTS fails"},
+        }
+    )
+    writer = StatementWriter(github_repo="o/r", http_get=github)
+    assert writer.write("feat(snowflake): support ignore grants (#8917)", "", [], "").text == (
+        "IGNORE GRANTS fails"
+    )
+
+
+def test_hint_for_commit_style_title() -> None:
+    hints = leakage_hints("fix(optimizer): preserve subqueries\n\nThey disappear.", "", "")
+    assert hints == ["starts with a commit-style title, which usually describes the change"]
+
+
+def test_names_that_tests_contain_are_not_flagged() -> None:
+    patch = "@@ -1 +1 @@ class Teradata(Dialect):\n-    x = 1\n+    unnest_subqueries = 2\n"
+    tests = "tests/fixtures/optimizer/unnest_subqueries.sql\nvalidate(dialect='teradata')"
+    statement = "Teradata's unnest_subqueries rule hoists subqueries."
+    assert leakage_hints(statement, patch, tests) == []

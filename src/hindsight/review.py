@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from hindsight.mining.interface import gold_test_sources, required_new_names
 from hindsight.mining.statements import leakage_hints
 from hindsight.store import Store, Task
 
@@ -19,7 +20,7 @@ Prompt = Callable[[str], str]
 Echo = Callable[[str], None]
 Editor = Callable[[str], str | None]
 
-CHOICES = "[a]pprove  [e]dit  [d]iscard  [v]iew fix  [s]kip  [q]uit"
+CHOICES = "[a]pprove  [e]dit  [d]iscard  [t]ests  [v]iew fix  [s]kip  [q]uit"
 
 
 @dataclass
@@ -68,10 +69,20 @@ def _read(path: Path) -> str:
 
 
 def _gold_text(task_dir: Path, task: Task) -> str:
-    return "\n".join(_read(task_dir / "gold" / name) for name in task.gold_test_files)
+    """Everything the tests reveal: file contents, file paths and fail-to-pass test names."""
+    contents = [_read(task_dir / "gold" / name) for name in task.gold_test_files]
+    return "\n".join([*contents, *task.gold_test_files, *task.f2p_tests])
 
 
-def _show(task: Task, task_dir: Path, index: int, total: int, echo: Echo, link: str | None):
+def _show(
+    task: Task,
+    task_dir: Path,
+    index: int,
+    total: int,
+    echo: Echo,
+    link: str | None,
+    required: list[str],
+):
     echo("")
     echo(f"── Task {index}/{total} · {task.commit_sha[:10]} · {task.commit_date}")
     echo(task.subject)
@@ -97,6 +108,11 @@ def _show(task: Task, task_dir: Path, index: int, total: int, echo: Echo, link: 
                 echo(f"  ! {hint}")
     else:
         echo("  (no statement yet: edit to write one)")
+    missing = [n for n in required if n not in (task.statement or "")]
+    if missing:
+        echo("\nThe tests need names that do not exist yet; the statement should mention them:")
+        for name in missing:
+            echo(f"  ? {name}")
 
 
 def run_review(
@@ -107,6 +123,7 @@ def run_review(
     editor: Editor,
     reviewer: str,
     github_repo: str | None = None,
+    test_paths: tuple[str, ...] = ("tests",),
 ) -> ReviewSummary:
     tasks = store.accepted_tasks(curation_status="pending")
     summary = ReviewSummary()
@@ -117,7 +134,8 @@ def run_review(
     for index, task in enumerate(tasks, start=1):
         task_dir = task_dir_for(task.commit_sha)
         link = f"https://github.com/{github_repo}/commit/{task.commit_sha}" if github_repo else None
-        _show(task, task_dir, index, len(tasks), echo, link)
+        required = required_new_names(task_dir, task.gold_test_files, test_paths)
+        _show(task, task_dir, index, len(tasks), echo, link, required)
         while True:
             choice = prompt(CHOICES).strip().lower()[:1]
             if choice == "a":
@@ -135,13 +153,16 @@ def run_review(
                     task.statement_source = "human"
                     store.set_statement(task.commit_sha, task.statement, "human")
                     store.commit()
-                _show(task, task_dir, index, len(tasks), echo, link)
+                _show(task, task_dir, index, len(tasks), echo, link, required)
                 continue
             if choice == "d":
                 store.set_curation(task.commit_sha, "discarded", reviewer)
                 store.commit()
                 summary.discarded += 1
                 break
+            if choice == "t":
+                echo(gold_test_sources(task_dir, task.f2p_tests, task.gold_test_files))
+                continue
             if choice == "v":
                 echo(_read(task_dir / "reference" / "reference.patch") or "(empty patch)")
                 continue
@@ -151,5 +172,5 @@ def run_review(
             if choice == "q":
                 summary.stopped_early = True
                 return summary
-            echo("Please choose one of: a, e, d, v, s, q.")
+            echo("Please choose one of: a, e, d, t, v, s, q.")
     return summary

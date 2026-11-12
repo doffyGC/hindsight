@@ -202,6 +202,7 @@ def _write_statements(
             ai_discarded += 1
             continue
         store.set_statement(task.commit_sha, statement.text, statement.source)
+        store.commit()
         written += 1
     return written, ai_discarded
 
@@ -286,6 +287,7 @@ def mine(
             elif store.outcome(candidate.sha, Stage.AI_FILTER) is None:
                 # Never overwrite a discard made after reading the issue or PR text.
                 store.log(candidate.sha, Stage.AI_FILTER, Outcome.PASSED)
+        store.commit()
 
         final = _final_stage(build, classify)
         pending = [c for c in kept if force or store.outcome(c.sha, final) is None]
@@ -303,10 +305,12 @@ def mine(
         with typer.progressbar(selected, label=label) as progress:
             for candidate in progress:
                 if not _snapshot_one(cfg, store, candidate) or builder is None:
+                    store.commit()
                     continue
                 image = _build_one(cfg, store, builder, candidate, deps_image)
                 if image is not None and tests is not None:
                     _classify_one(cfg, store, tests, candidate, image)
+                store.commit()  # a crash or power loss keeps every finished task
 
         if tests is not None:
             written, ai_discarded = _write_statements(cfg, store, candidates, refresh_statements)
@@ -338,6 +342,7 @@ def review(config: Path = CONFIG_OPTION) -> None:
             editor=open_in_editor,
             reviewer=reviewer_name(cfg.project.repo),
             github_repo=_github_repo(cfg),
+            test_paths=tuple(cfg.project.test_paths),
         )
         remaining = len(store.accepted_tasks(curation_status="pending"))
         approved = len(store.accepted_tasks(curation_status="approved"))
